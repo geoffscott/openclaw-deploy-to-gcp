@@ -117,27 +117,58 @@ Each secret in the GCP project becomes an environment variable for OpenClaw. Cre
 
 > **Important:** This project should be dedicated to this deployment. All secrets in the project are loaded into the OpenClaw process.
 
-**Add a secret:**
+### Required secrets
+
+| Secret | Value | How to obtain |
+|--------|-------|---------------|
+| `ANTHROPIC_API_KEY` | Anthropic API key (`sk-ant-...`) | [Anthropic Console](https://console.anthropic.com/) → API Keys |
+| `OPENCLAW_GATEWAY_TOKEN` | Gateway device token | SSH into the VM and run `sudo -u openclaw openclaw setup` — the token is printed at the end of the interactive setup. Store it as a secret so it persists across reboots (the VM's credential paths are RAM-backed). |
+
+#### Option A — CLI
 
 ```bash
-gcloud secrets create ANTHROPIC_API_KEY \
-  --project=YOUR_PROJECT_ID \
-  --data-file=- <<< 'sk-ant-...'
-```
+# 1. SSH in and run setup to get the gateway token
+gcloud compute ssh iap-vps --zone=us-central1-a --tunnel-through-iap
+sudo -u openclaw openclaw setup
+# Copy the token printed at the end
 
-**Common secrets for OpenClaw:**
-
-```bash
+# 2. Store as secrets
 gcloud secrets create ANTHROPIC_API_KEY --project=YOUR_PROJECT_ID --data-file=- <<< 'sk-ant-...'
-gcloud secrets create TELEGRAM_BOT_TOKEN --project=YOUR_PROJECT_ID --data-file=- <<< '123456:ABC-DEF...'
-gcloud secrets create SLACK_BOT_TOKEN --project=YOUR_PROJECT_ID --data-file=- <<< 'xoxb-...'
-gcloud secrets create SLACK_APP_TOKEN --project=YOUR_PROJECT_ID --data-file=- <<< 'xapp-...'
-gcloud secrets create OPENCLAW_GATEWAY_TOKEN --project=YOUR_PROJECT_ID --data-file=- <<< '...'
+gcloud secrets create OPENCLAW_GATEWAY_TOKEN --project=YOUR_PROJECT_ID --data-file=- <<< '<token-from-setup>'
+
+# 3. Restart to pick up new secrets
+gcloud compute ssh iap-vps --tunnel-through-iap \
+  -- sudo systemctl restart openclaw-gateway
 ```
+
+#### Option B — GCP Console UI
+
+1. Open [Secret Manager](https://console.cloud.google.com/security/secret-manager) in the GCP Console
+2. Click **Create Secret**
+3. Set **Name** to `ANTHROPIC_API_KEY` and paste your API key as the **Secret value**
+4. Click **Create Secret**
+5. Repeat for `OPENCLAW_GATEWAY_TOKEN` (paste the token from `openclaw setup`)
+6. Restart the gateway to pick up the new secrets:
+   ```bash
+   gcloud compute ssh iap-vps --tunnel-through-iap \
+     -- sudo systemctl restart openclaw-gateway
+   ```
+
+### Optional secrets
+
+Add these as needed for your integrations:
+
+| Secret | Value | Notes |
+|--------|-------|-------|
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token (`123456:ABC-DEF...`) | From [@BotFather](https://t.me/BotFather) |
+| `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) | From Slack app settings |
+| `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`) | Required for Socket Mode (no public URL needed) |
 
 > **Note:** This VM has no public IP, so Slack must use **Socket Mode** (the default). Socket Mode requires a `SLACK_APP_TOKEN` (`xapp-...`) — do not use `SLACK_SIGNING_SECRET`, which is for HTTP Events API mode and requires a publicly reachable URL.
 
-**Update an existing secret:**
+### Update an existing secret
+
+**CLI:**
 
 ```bash
 gcloud secrets versions add ANTHROPIC_API_KEY \
@@ -145,14 +176,16 @@ gcloud secrets versions add ANTHROPIC_API_KEY \
   --data-file=- <<< 'sk-ant-new-key...'
 ```
 
-**Pick up new or updated secrets** (no reboot needed):
+**Console UI:** Open [Secret Manager](https://console.cloud.google.com/security/secret-manager), click the secret name, then **New Version**, paste the new value, and click **Add New Version**.
+
+Then restart the service to pick up the change (no reboot needed):
 
 ```bash
 gcloud compute ssh iap-vps --tunnel-through-iap \
   -- sudo systemctl restart openclaw-gateway
 ```
 
-**What's protected:**
+### What's protected
 
 | Path | Protection |
 |------|-----------|

@@ -251,6 +251,27 @@ if gcloud compute instances describe "${INSTANCE_NAME}" \
      --zone="${ZONE}" \
      --project="${PROJECT_ID}" &>/dev/null; then
   echo "  Instance already exists — skipping creation."
+
+  # If Secret Manager is now ready but the VM has no service account, attach one.
+  # This handles the case where the initial deploy ran before APIs were enabled.
+  if [[ "${SM_READY}" == "true" ]]; then
+    CURRENT_SA="$(gcloud compute instances describe "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --format="value(serviceAccounts[0].email)" 2>/dev/null)"
+    if [[ -z "${CURRENT_SA}" || "${CURRENT_SA}" == "None" ]]; then
+      echo "  VM has no service account — attaching ${VM_SA_EMAIL}…"
+      echo "  (Requires stop/start)"
+      gcloud compute instances stop "${INSTANCE_NAME}" \
+        --zone="${ZONE}" --project="${PROJECT_ID}" --quiet
+      gcloud compute instances set-service-account "${INSTANCE_NAME}" \
+        --zone="${ZONE}" --project="${PROJECT_ID}" \
+        --service-account="${VM_SA_EMAIL}" \
+        --scopes="https://www.googleapis.com/auth/cloud-platform"
+      gcloud compute instances start "${INSTANCE_NAME}" \
+        --zone="${ZONE}" --project="${PROJECT_ID}" --quiet
+      echo "  ✓ Service account attached and VM restarted"
+    fi
+  fi
 else
   # Build service account flags
   SA_FLAGS=()
