@@ -169,10 +169,11 @@ gcloud compute routers nats delete iap-vps-nat \
 gcloud compute routers delete iap-vps-router --region=us-central1 --quiet
 
 # Delete all secrets and VM service account
-for SECRET in $(gcloud secrets list --format="value(name)"); do
-  gcloud secrets delete "${SECRET}" --quiet
+for SECRET in $(gcloud secrets list --project=YOUR_PROJECT_ID --format="value(name)"); do
+  gcloud secrets delete "${SECRET}" --project=YOUR_PROJECT_ID --quiet
 done
-gcloud iam service-accounts delete iap-vps-vm-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com --quiet
+gcloud iam service-accounts delete iap-vps-vm-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com \
+  --project=YOUR_PROJECT_ID --quiet
 ```
 
 ---
