@@ -1,26 +1,35 @@
 #!/bin/bash
-# deploy.sh — Deploy an IAP-only VPS on Google Cloud
+# deploy.sh — Deploy an IAP-only VPS on Google Cloud with OpenClaw pre-installed
 # Usage: bash deploy.sh [--project PROJECT_ID] [--zone ZONE] [--name INSTANCE_NAME]
+#                       [--machine-type MACHINE_TYPE]
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─── Defaults ────────────────────────────────────────────────────────────────
 INSTANCE_NAME="${INSTANCE_NAME:-iap-vps}"
 ZONE="${ZONE:-us-central1-a}"
-MACHINE_TYPE="${MACHINE_TYPE:-e2-micro}"
+MACHINE_TYPE="${MACHINE_TYPE:-e2-medium}"
 IMAGE_FAMILY="${IMAGE_FAMILY:-debian-12}"
 IMAGE_PROJECT="${IMAGE_PROJECT:-debian-cloud}"
 NETWORK="${NETWORK:-default}"
 FIREWALL_RULE_NAME="${FIREWALL_RULE_NAME:-allow-iap-ssh}"
+BOOT_DISK_TYPE="${BOOT_DISK_TYPE:-pd-ssd}"
+BOOT_DISK_SIZE="${BOOT_DISK_SIZE:-20GB}"
 
 # IAP's published IP range for TCP forwarding (SSH tunnelling)
 IAP_CIDR="35.235.240.0/20"
 
+# Secret Manager secret name (KEY=VALUE env file format)
+SECRET_NAME="openclaw-env"
+
 # ─── Parse flags ─────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --project)  PROJECT_ID="$2"; shift 2 ;;
-    --zone)     ZONE="$2";       shift 2 ;;
-    --name)     INSTANCE_NAME="$2"; shift 2 ;;
+    --project)       PROJECT_ID="$2";   shift 2 ;;
+    --zone)          ZONE="$2";         shift 2 ;;
+    --name)          INSTANCE_NAME="$2"; shift 2 ;;
+    --machine-type)  MACHINE_TYPE="$2"; shift 2 ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
@@ -36,28 +45,138 @@ if [[ -z "${PROJECT_ID:-}" ]]; then
 fi
 
 REGION="${ZONE%-*}"   # strip zone suffix, e.g. us-central1-a → us-central1
+VM_SA_NAME="${INSTANCE_NAME}-vm-sa"
+VM_SA_EMAIL="${VM_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
-echo "  GCP IAP-Only VPS Deployment"
+echo "  GCP IAP-Only VPS + OpenClaw Deployment"
 echo "════════════════════════════════════════════════════════════"
 echo "  Project  : ${PROJECT_ID}"
 echo "  Zone     : ${ZONE}"
 echo "  Region   : ${REGION}"
 echo "  Instance : ${INSTANCE_NAME}"
 echo "  Type     : ${MACHINE_TYPE}"
+echo "  Disk     : ${BOOT_DISK_SIZE} ${BOOT_DISK_TYPE}"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
 # ─── Enable required APIs ────────────────────────────────────────────────────
 echo "▶ Enabling required APIs…"
-gcloud services enable \
-  compute.googleapis.com \
-  iap.googleapis.com \
-  --project="${PROJECT_ID}" \
-  --quiet
 
-echo "  ✓ APIs enabled"
+REQUIRED_APIS="compute.googleapis.com iap.googleapis.com secretmanager.googleapis.com iam.googleapis.com"
+
+if gcloud services enable ${REQUIRED_APIS} \
+  --project="${PROJECT_ID}" \
+  --quiet 2>/dev/null; then
+  echo "  ✓ APIs enabled"
+else
+  echo "  ⚠  Could not enable APIs (may lack serviceusage permissions)."
+  echo "     Checking if they are already enabled…"
+  MISSING_APIS=""
+  for API in ${REQUIRED_APIS}; do
+    if ! gcloud services list --project="${PROJECT_ID}" --filter="name:${API}" --format="value(name)" 2>/dev/null | grep -q "${API}"; then
+      MISSING_APIS="${MISSING_APIS} ${API}"
+    fi
+  done
+  if [[ -n "${MISSING_APIS}" ]]; then
+    echo "  ⚠  Missing APIs:${MISSING_APIS}"
+    echo "     A project Owner should run:"
+    echo "       gcloud services enable${MISSING_APIS} --project=${PROJECT_ID}"
+    echo ""
+    echo "     Continuing with available APIs…"
+  else
+    echo "  ✓ APIs already enabled"
+  fi
+fi
+
+# ─── Secret Manager: create VM service account and secret ────────────────────
+echo ""
+echo "▶ Setting up Secret Manager for OpenClaw secrets…"
+
+SM_READY=false
+
+# Check if Secret Manager API is available
+if gcloud services list --project="${PROJECT_ID}" --filter="name:secretmanager.googleapis.com" \
+   --format="value(name)" 2>/dev/null | grep -q "secretmanager"; then
+
+  # Create VM service account (for Secret Manager access)
+  if gcloud iam service-accounts describe "${VM_SA_EMAIL}" \
+       --project="${PROJECT_ID}" &>/dev/null 2>&1; then
+    echo "  Service account ${VM_SA_NAME} already exists."
+  else
+    if gcloud iam service-accounts create "${VM_SA_NAME}" \
+         --display-name="OpenClaw VM (${INSTANCE_NAME})" \
+         --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+      echo "  ✓ Created service account ${VM_SA_NAME}"
+    else
+      echo "  ⚠  Could not create service account (need iam.googleapis.com API)."
+    fi
+  fi
+
+  # Grant secretmanager.secretAccessor to the VM service account
+  if gcloud iam service-accounts describe "${VM_SA_EMAIL}" \
+       --project="${PROJECT_ID}" &>/dev/null 2>&1; then
+    gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+      --member="serviceAccount:${VM_SA_EMAIL}" \
+      --role="roles/secretmanager.secretAccessor" \
+      --condition=None \
+      --quiet 2>/dev/null || true
+
+    # The deployer SA needs iam.serviceAccountUser on the VM SA to attach it
+    DEPLOYER_EMAIL="$(gcloud config get-value account 2>/dev/null)"
+    if [[ -n "${DEPLOYER_EMAIL}" ]]; then
+      gcloud iam service-accounts add-iam-policy-binding "${VM_SA_EMAIL}" \
+        --member="serviceAccount:${DEPLOYER_EMAIL}" \
+        --role="roles/iam.serviceAccountUser" \
+        --project="${PROJECT_ID}" \
+        --quiet 2>/dev/null || true
+    fi
+    SM_READY=true
+  fi
+
+  # Create the openclaw-env secret (empty placeholder)
+  if gcloud secrets describe "${SECRET_NAME}" \
+       --project="${PROJECT_ID}" &>/dev/null 2>&1; then
+    echo "  Secret '${SECRET_NAME}' already exists."
+  else
+    if echo -n "" | gcloud secrets create "${SECRET_NAME}" \
+         --project="${PROJECT_ID}" \
+         --data-file=- \
+         --quiet 2>/dev/null; then
+      echo "  ✓ Created secret '${SECRET_NAME}' (empty — populate it with your API keys)"
+    else
+      echo "  ⚠  Could not create secret (check permissions)."
+    fi
+  fi
+
+  if [[ "${SM_READY}" == "true" ]]; then
+    echo "  ✓ Secret Manager configured"
+  fi
+else
+  echo "  ⚠  Secret Manager API not enabled — skipping."
+fi
+
+if [[ "${SM_READY}" != "true" ]]; then
+  echo ""
+  echo "  To enable Secret Manager, a project Owner should run:"
+  echo ""
+  echo "    gcloud services enable secretmanager.googleapis.com iam.googleapis.com \\"
+  echo "      --project=${PROJECT_ID}"
+  echo ""
+  echo "    gcloud iam service-accounts create ${VM_SA_NAME} \\"
+  echo "      --display-name='OpenClaw VM (${INSTANCE_NAME})' \\"
+  echo "      --project=${PROJECT_ID}"
+  echo ""
+  echo "    gcloud projects add-iam-policy-binding ${PROJECT_ID} \\"
+  echo "      --member='serviceAccount:${VM_SA_EMAIL}' \\"
+  echo "      --role='roles/secretmanager.secretAccessor'"
+  echo ""
+  echo "    gcloud secrets create ${SECRET_NAME} --project=${PROJECT_ID} \\"
+  echo "      --data-file=- <<< 'ANTHROPIC_API_KEY=your-key-here'"
+  echo ""
+  echo "  Then re-run this script to attach the service account to the VM."
+fi
 
 # ─── Firewall: allow SSH only from IAP ───────────────────────────────────────
 echo ""
@@ -108,6 +227,35 @@ else
 fi
 echo "  ✓ Public SSH blocked"
 
+# ─── Cloud NAT: outbound internet for private VM ────────────────────────────
+ROUTER_NAME="${INSTANCE_NAME}-router"
+NAT_NAME="${INSTANCE_NAME}-nat"
+
+echo ""
+echo "▶ Configuring Cloud NAT for outbound internet access…"
+
+if ! gcloud compute routers describe "${ROUTER_NAME}" \
+     --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+  gcloud compute routers create "${ROUTER_NAME}" \
+    --project="${PROJECT_ID}" \
+    --region="${REGION}" \
+    --network="${NETWORK}" \
+    --quiet
+fi
+
+if ! gcloud compute routers nats describe "${NAT_NAME}" \
+     --router="${ROUTER_NAME}" --region="${REGION}" \
+     --project="${PROJECT_ID}" &>/dev/null; then
+  gcloud compute routers nats create "${NAT_NAME}" \
+    --router="${ROUTER_NAME}" \
+    --region="${REGION}" \
+    --project="${PROJECT_ID}" \
+    --auto-allocate-nat-external-ips \
+    --nat-all-subnet-ip-ranges \
+    --quiet
+fi
+echo "  ✓ Cloud NAT configured"
+
 # ─── Create VM instance ───────────────────────────────────────────────────────
 echo ""
 echo "▶ Creating VM instance '${INSTANCE_NAME}'…"
@@ -117,6 +265,18 @@ if gcloud compute instances describe "${INSTANCE_NAME}" \
      --project="${PROJECT_ID}" &>/dev/null; then
   echo "  Instance already exists — skipping creation."
 else
+  # Build service account flags
+  SA_FLAGS=()
+  if [[ "${SM_READY}" == "true" ]]; then
+    SA_FLAGS+=(--service-account="${VM_SA_EMAIL}")
+    SA_FLAGS+=(--scopes="https://www.googleapis.com/auth/cloud-platform")
+    echo "  Using service account: ${VM_SA_EMAIL}"
+  else
+    SA_FLAGS+=(--no-service-account)
+    SA_FLAGS+=(--no-scopes)
+    echo "  No service account (Secret Manager not configured)."
+  fi
+
   gcloud compute instances create "${INSTANCE_NAME}" \
     --project="${PROJECT_ID}" \
     --zone="${ZONE}" \
@@ -125,8 +285,12 @@ else
     --image-project="${IMAGE_PROJECT}" \
     --network="${NETWORK}" \
     --no-address \
+    "${SA_FLAGS[@]}" \
     --tags="iap-ssh" \
     --metadata="enable-oslogin=TRUE" \
+    --metadata-from-file="startup-script=${SCRIPT_DIR}/startup.sh" \
+    --boot-disk-type="${BOOT_DISK_TYPE}" \
+    --boot-disk-size="${BOOT_DISK_SIZE}" \
     --shielded-secure-boot \
     --shielded-vtpm \
     --shielded-integrity-monitoring \
@@ -168,4 +332,41 @@ echo "      --tunnel-through-iap"
 echo ""
 echo "  The instance has NO public IP. All SSH traffic is"
 echo "  routed securely through Google's Identity-Aware Proxy."
+echo ""
+echo "  OpenClaw is being installed on the VM (2-3 minutes on"
+echo "  first boot while Node.js and OpenClaw are downloaded)."
+echo ""
+echo "  After connecting via SSH, check the service:"
+echo ""
+echo "    sudo systemctl status openclaw-gateway"
+echo "    sudo journalctl -u openclaw-gateway -f"
+echo ""
+echo "  ── OpenClaw Web UI ────────────────────────────────────"
+echo ""
+echo "  Access the web UI securely through an IAP SSH tunnel:"
+echo ""
+echo "    gcloud compute ssh ${INSTANCE_NAME} \\"
+echo "      --project=${PROJECT_ID} \\"
+echo "      --zone=${ZONE} \\"
+echo "      --tunnel-through-iap \\"
+echo "      -- -L 18789:localhost:18789"
+echo ""
+echo "  Then open http://localhost:18789 in your browser."
+echo "  The tunnel stays open as long as the SSH session is active."
+echo ""
+echo "  ── Secrets Management ──────────────────────────────────"
+echo ""
+echo "  Add your API keys to Secret Manager (never stored on disk):"
+echo ""
+echo "    gcloud secrets versions add ${SECRET_NAME} \\"
+echo "      --project=${PROJECT_ID} --data-file=- <<'EOF'"
+echo "    ANTHROPIC_API_KEY=sk-ant-..."
+echo "    TELEGRAM_BOT_TOKEN=..."
+echo "    EOF"
+echo ""
+echo "  Then restart the service to pick up new secrets:"
+echo ""
+echo "    gcloud compute ssh ${INSTANCE_NAME} --tunnel-through-iap \\"
+echo "      --project=${PROJECT_ID} --zone=${ZONE} \\"
+echo "      -- sudo systemctl restart openclaw-gateway"
 echo "════════════════════════════════════════════════════════════"

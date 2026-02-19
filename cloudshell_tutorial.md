@@ -1,6 +1,6 @@
-# Deploy an IAP-Only VPS on GCP
+# Deploy an IAP-Only VPS with OpenClaw on GCP
 
-This tutorial walks you through deploying a secure virtual machine that is **only reachable through Google's [Identity-Aware Proxy (IAP)](https://cloud.google.com/iap)** — no public IP, no open SSH port on the internet.
+This tutorial walks you through deploying a secure virtual machine with [OpenClaw](https://openclaw.ai/) pre-installed. The VM is **only reachable through Google's [Identity-Aware Proxy (IAP)](https://cloud.google.com/iap)** — no public IP, no open SSH port on the internet. Secrets are stored in Secret Manager and never written to persistent disk.
 
 ---
 
@@ -30,10 +30,13 @@ Key actions performed by the script:
 
 | Step | What happens |
 |------|-------------|
-| Enable APIs | `compute.googleapis.com` and `iap.googleapis.com` |
+| Enable APIs | `compute`, `iap`, `secretmanager`, `iam` |
+| Secret Manager | Creates `openclaw-env` secret and a VM service account |
 | Firewall (allow) | SSH (`tcp:22`) from IAP range `35.235.240.0/20` only |
 | Firewall (deny) | Direct SSH from `0.0.0.0/0` blocked |
-| VM creation | No external IP, OS Login enabled, Shielded VM |
+| Cloud NAT | Outbound-only internet for the private VM |
+| VM creation | `e2-medium`, 20 GB SSD, no external IP, OS Login, Shielded VM |
+| Startup script | Installs Node.js 22 and OpenClaw; starts `openclaw-gateway` service |
 | IAM binding | Grants your account `roles/iap.tunnelResourceAccessor` |
 
 ---
@@ -49,7 +52,7 @@ bash deploy.sh
 Or customise it:
 
 ```bash
-bash deploy.sh --name my-vps --zone europe-west1-b
+bash deploy.sh --name my-vps --zone europe-west1-b --machine-type e2-small
 ```
 
 Available flags:
@@ -59,12 +62,26 @@ Available flags:
 | `--project` | current gcloud project | GCP project ID |
 | `--zone` | `us-central1-a` | Compute zone |
 | `--name` | `iap-vps` | VM instance name |
+| `--machine-type` | `e2-medium` | Machine type (e2-medium recommended for OpenClaw) |
 
 The script is **idempotent** — safe to run multiple times.
 
 ---
 
-## Step 4 — Connect to your VPS
+## Step 4 — Add your API keys
+
+Store your secrets in Secret Manager (they're injected into OpenClaw at startup, never written to disk):
+
+```bash
+gcloud secrets versions add openclaw-env --data-file=- <<'EOF'
+ANTHROPIC_API_KEY=sk-ant-...
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+EOF
+```
+
+---
+
+## Step 5 — Connect to your VPS
 
 Once deployment finishes, SSH into the instance through IAP:
 
@@ -80,7 +97,29 @@ Replace `iap-vps` and `us-central1-a` with your chosen instance name and zone if
 
 ---
 
-## Step 5 — Verify access control
+## Step 6 — Verify OpenClaw
+
+OpenClaw is installed automatically on first boot (takes 2-3 minutes). Check the service status:
+
+```bash
+sudo systemctl status openclaw-gateway
+```
+
+Watch the logs:
+
+```bash
+sudo journalctl -u openclaw-gateway -f
+```
+
+To pick up new secrets after updating them in Secret Manager:
+
+```bash
+sudo systemctl restart openclaw-gateway
+```
+
+---
+
+## Step 7 — Verify access control
 
 Confirm the instance has no external IP:
 
@@ -105,10 +144,19 @@ gcloud compute instances delete iap-vps --zone=us-central1-a --quiet
 # Delete firewall rules
 gcloud compute firewall-rules delete allow-iap-ssh --quiet
 gcloud compute firewall-rules delete allow-iap-ssh-deny-public --quiet
+
+# Delete Cloud NAT and router
+gcloud compute routers nats delete iap-vps-nat \
+  --router=iap-vps-router --region=us-central1 --quiet
+gcloud compute routers delete iap-vps-router --region=us-central1 --quiet
+
+# Delete Secret Manager secret and VM service account
+gcloud secrets delete openclaw-env --quiet
+gcloud iam service-accounts delete iap-vps-vm-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com --quiet
 ```
 
 ---
 
 <walkthrough-conclusion-trophy></walkthrough-conclusion-trophy>
 
-**Deployment complete!** Your VPS is running with IAP-only access — no exposed ports, no public IP.
+**Deployment complete!** Your VPS is running OpenClaw with IAP-only access — no exposed ports, no public IP, secrets in RAM only. Add your API keys to Secret Manager and restart the service to get started.

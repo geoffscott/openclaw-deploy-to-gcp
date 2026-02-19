@@ -1,6 +1,8 @@
 # Claude Code — Project Instructions
 
-This repository deploys an IAP-only VPS on Google Cloud Platform using `deploy.sh`.
+This repository deploys an IAP-only VPS on Google Cloud Platform with OpenClaw
+pre-installed using `deploy.sh`. Secrets are managed through GCP Secret Manager
+and injected into the OpenClaw process at startup — never written to persistent disk.
 
 ## Environment Setup
 
@@ -22,17 +24,11 @@ gcloud iam service-accounts create claude-deployer \
   --project=YOUR_PROJECT_ID
 
 # Grant required roles
-gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:claude-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
-  --role="roles/compute.admin"
-
-gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:claude-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
-  --role="roles/iam.securityAdmin"
-
-gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:claude-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
-  --role="roles/serviceusage.serviceUsageAdmin"
+for ROLE in roles/compute.admin roles/iam.securityAdmin roles/serviceusage.serviceUsageAdmin roles/iam.serviceAccountAdmin roles/secretmanager.admin; do
+  gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+    --member="serviceAccount:claude-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+    --role="${ROLE}"
+done
 
 # Download key and base64-encode it for the env var
 gcloud iam service-accounts keys create key.json \
@@ -42,15 +38,56 @@ base64 -w 0 key.json   # copy this output → GCP_SERVICE_ACCOUNT_KEY secret
 rm key.json
 ```
 
+### Required APIs (enable as project Owner if the deployer SA cannot)
+
+```bash
+gcloud services enable \
+  compute.googleapis.com \
+  iap.googleapis.com \
+  secretmanager.googleapis.com \
+  iam.googleapis.com \
+  --project=YOUR_PROJECT_ID
+```
+
 ## Running the deploy script
 
 ```bash
 bash deploy.sh --project "${GCP_PROJECT_ID}"
-# or with custom zone/name:
-bash deploy.sh --project "${GCP_PROJECT_ID}" --zone us-west1-b --name my-vps
+# or with custom zone/name/machine-type:
+bash deploy.sh --project "${GCP_PROJECT_ID}" --zone us-west1-b --name my-vps --machine-type e2-small
 ```
 
 The script is **idempotent** — safe to run multiple times.
+
+## Managing OpenClaw secrets
+
+Secrets are stored in Secret Manager as a single `openclaw-env` secret in
+`KEY=VALUE` format. They are fetched at each service start and loaded into
+the process via `/run/openclaw/env` (tmpfs — RAM only, never on disk).
+
+```bash
+# Add or update secrets
+gcloud secrets versions add openclaw-env \
+  --project="${GCP_PROJECT_ID}" --data-file=- <<'EOF'
+ANTHROPIC_API_KEY=sk-ant-...
+TELEGRAM_BOT_TOKEN=...
+SLACK_BOT_TOKEN=xoxb-...
+OPENCLAW_GATEWAY_TOKEN=...
+EOF
+
+# Restart service to pick up new secrets
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo systemctl restart openclaw-gateway
+```
+
+### Credential isolation on the VM
+
+| Path | Protection |
+|------|-----------|
+| `/run/openclaw/env` | tmpfs — secrets exist only in RAM |
+| `~/.openclaw/credentials/` | Bind-mounted to tmpfs |
+| `~/.openclaw/.env` | Symlinked to `/dev/null` |
 
 ## Verifying provisioned resources
 
@@ -70,7 +107,7 @@ gcloud compute firewall-rules list \
 
 # APIs enabled
 gcloud services list --project="${GCP_PROJECT_ID}" \
-  --filter="name:(compute.googleapis.com OR iap.googleapis.com)" \
+  --filter="name:(compute.googleapis.com OR iap.googleapis.com OR secretmanager.googleapis.com)" \
   --format="table(name,state)"
 
 # IAP IAM binding
@@ -78,6 +115,24 @@ gcloud projects get-iam-policy "${GCP_PROJECT_ID}" \
   --flatten="bindings[].members" \
   --filter="bindings.role:roles/iap.tunnelResourceAccessor" \
   --format="table(bindings.members)"
+
+# Cloud NAT
+gcloud compute routers nats describe iap-vps-nat \
+  --router=iap-vps-router --region=us-central1 \
+  --project="${GCP_PROJECT_ID}"
+
+# Secret Manager secret
+gcloud secrets describe openclaw-env --project="${GCP_PROJECT_ID}"
+
+# OpenClaw startup script output (from serial console)
+gcloud compute instances get-serial-port-output iap-vps \
+  --zone=us-central1-a --project="${GCP_PROJECT_ID}" \
+  | grep openclaw-startup
+
+# OpenClaw service status (via SSH)
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo systemctl status openclaw-gateway
 ```
 
 ## Cleanup
@@ -86,5 +141,14 @@ gcloud projects get-iam-policy "${GCP_PROJECT_ID}" \
 gcloud compute instances delete iap-vps --zone=us-central1-a \
   --project="${GCP_PROJECT_ID}" --quiet
 gcloud compute firewall-rules delete allow-iap-ssh allow-iap-ssh-deny-public \
+  --project="${GCP_PROJECT_ID}" --quiet
+gcloud compute routers nats delete iap-vps-nat \
+  --router=iap-vps-router --region=us-central1 \
+  --project="${GCP_PROJECT_ID}" --quiet
+gcloud compute routers delete iap-vps-router --region=us-central1 \
+  --project="${GCP_PROJECT_ID}" --quiet
+gcloud secrets delete openclaw-env \
+  --project="${GCP_PROJECT_ID}" --quiet
+gcloud iam service-accounts delete iap-vps-vm-sa@${GCP_PROJECT_ID}.iam.gserviceaccount.com \
   --project="${GCP_PROJECT_ID}" --quiet
 ```
