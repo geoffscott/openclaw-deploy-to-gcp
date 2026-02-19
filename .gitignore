@@ -1,0 +1,33 @@
+# Service account keys (the most common accidental commit)
+*.json
+!.claude/settings.json
+
+# Environment / secret files
+.env
+.env.*
+*.env
+
+# Private keys
+*.pem
+*.key
+*.p12
+
+# Terraform state (if ever added)
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak

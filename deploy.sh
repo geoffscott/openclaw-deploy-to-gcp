@@ -61,7 +61,7 @@ echo ""
 # ─── Enable required APIs ────────────────────────────────────────────────────
 echo "▶ Enabling required APIs…"
 
-REQUIRED_APIS="compute.googleapis.com iap.googleapis.com secretmanager.googleapis.com iam.googleapis.com"
+REQUIRED_APIS="compute.googleapis.com iap.googleapis.com secretmanager.googleapis.com iam.googleapis.com logging.googleapis.com monitoring.googleapis.com"
 
 if gcloud services enable ${REQUIRED_APIS} \
   --project="${PROJECT_ID}" \
@@ -191,6 +191,7 @@ else
     --action=ALLOW \
     --rules="tcp:22" \
     --source-ranges="${IAP_CIDR}" \
+    --priority=500 \
     --target-tags="iap-ssh" \
     --description="Allow SSH only through Identity-Aware Proxy" \
     --quiet
@@ -219,6 +220,30 @@ else
     --quiet
 fi
 echo "  ✓ Public SSH blocked"
+
+# ─── Firewall: deny all ingress to OpenClaw gateway port ─────────────────────
+# The web UI should only be accessed via IAP SSH tunnel port-forwarding.
+DENY_OPENCLAW_RULE="${INSTANCE_NAME}-deny-openclaw-port"
+echo ""
+echo "▶ Configuring rule '${DENY_OPENCLAW_RULE}' (block intra-VPC port 18789)…"
+
+if gcloud compute firewall-rules describe "${DENY_OPENCLAW_RULE}" \
+     --project="${PROJECT_ID}" &>/dev/null; then
+  echo "  Rule already exists — skipping."
+else
+  gcloud compute firewall-rules create "${DENY_OPENCLAW_RULE}" \
+    --project="${PROJECT_ID}" \
+    --network="${NETWORK}" \
+    --direction=INGRESS \
+    --action=DENY \
+    --rules="tcp:18789" \
+    --source-ranges="0.0.0.0/0" \
+    --priority=900 \
+    --target-tags="iap-ssh" \
+    --description="Deny all ingress to OpenClaw gateway port (access via IAP SSH tunnel only)" \
+    --quiet
+fi
+echo "  ✓ Port 18789 blocked from all ingress"
 
 # ─── Cloud NAT: outbound internet for private VM ────────────────────────────
 ROUTER_NAME="${INSTANCE_NAME}-router"
@@ -272,7 +297,7 @@ if gcloud compute instances describe "${INSTANCE_NAME}" \
       gcloud compute instances set-service-account "${INSTANCE_NAME}" \
         --zone="${ZONE}" --project="${PROJECT_ID}" \
         --service-account="${VM_SA_EMAIL}" \
-        --scopes="https://www.googleapis.com/auth/cloud-platform"
+        --scopes="https://www.googleapis.com/auth/secretmanager,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write"
       gcloud compute instances start "${INSTANCE_NAME}" \
         --zone="${ZONE}" --project="${PROJECT_ID}" --quiet
       echo "  ✓ Service account attached and VM restarted"
@@ -283,7 +308,7 @@ else
   SA_FLAGS=()
   if [[ "${SM_READY}" == "true" ]]; then
     SA_FLAGS+=(--service-account="${VM_SA_EMAIL}")
-    SA_FLAGS+=(--scopes="https://www.googleapis.com/auth/cloud-platform")
+    SA_FLAGS+=(--scopes="https://www.googleapis.com/auth/secretmanager,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write")
     echo "  Using service account: ${VM_SA_EMAIL}"
   else
     SA_FLAGS+=(--no-service-account)
