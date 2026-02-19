@@ -239,6 +239,75 @@ VM instance (no external IP)
 
 ---
 
+## Contributing
+
+This repo is designed to be developed with [Claude Code](https://docs.anthropic.com/en/docs/claude-code). The session-start hook (`.claude/hooks/session-start.sh`) automatically installs `gcloud` and authenticates with GCP when running in a cloud session.
+
+### Developer environment setup
+
+1. **Create a dedicated GCP project** (or reuse an existing one) with billing enabled.
+
+2. **Create a deployer service account** and grant it the required roles:
+
+   ```bash
+   gcloud iam service-accounts create openclaw-deployer \
+     --display-name="OpenClaw Deployer" \
+     --project=YOUR_PROJECT_ID
+
+   for ROLE in roles/compute.admin roles/iam.securityAdmin \
+               roles/serviceusage.serviceUsageAdmin \
+               roles/iam.serviceAccountAdmin roles/secretmanager.admin; do
+     gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+       --member="serviceAccount:openclaw-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+       --role="${ROLE}"
+   done
+   ```
+
+3. **Download the key and base64-encode it:**
+
+   ```bash
+   gcloud iam service-accounts keys create key.json \
+     --iam-account="openclaw-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com"
+
+   base64 -w 0 key.json
+   # Copy the output — this is your GCP_SERVICE_ACCOUNT_KEY value
+   rm key.json
+   ```
+
+4. **Add both secrets** to your Claude Code environment settings (Settings > Environment Variables > Secrets):
+
+   | Secret name | Value |
+   |-------------|-------|
+   | `GCP_SERVICE_ACCOUNT_KEY` | The base64-encoded JSON key from step 3 |
+   | `GCP_PROJECT_ID` | Your GCP project ID (e.g. `my-project-123`) |
+
+   The session-start hook reads these on every cloud session to authenticate `gcloud` automatically.
+
+5. **Enable required APIs** (if the deployer SA cannot enable them itself):
+
+   ```bash
+   gcloud services enable \
+     compute.googleapis.com \
+     iap.googleapis.com \
+     secretmanager.googleapis.com \
+     iam.googleapis.com \
+     --project=YOUR_PROJECT_ID
+   ```
+
+### How it works
+
+When Claude Code starts a cloud session, the hook at `.claude/hooks/session-start.sh`:
+
+1. Installs the Google Cloud SDK (downloaded from GCS, not `sdk.cloud.google.com`)
+2. Decodes `GCP_SERVICE_ACCOUNT_KEY` from base64 to a temporary JSON file
+3. Runs `gcloud auth activate-service-account` with the key
+4. Sets the default project from `GCP_PROJECT_ID`
+5. Cleans up the temporary key file
+
+The deploy script (`deploy.sh`) then runs using the authenticated service account. It also creates a separate VM service account (`iap-vps-vm-sa`) at runtime for Secret Manager access — this is distinct from the deployer SA.
+
+---
+
 ## Cleanup
 
 ```bash
