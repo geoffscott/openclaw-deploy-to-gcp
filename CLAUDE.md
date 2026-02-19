@@ -1,6 +1,7 @@
 # Claude Code — Project Instructions
 
-This repository deploys an IAP-only VPS on Google Cloud Platform using `deploy.sh`.
+This repository deploys an IAP-only VPS on Google Cloud Platform with OpenClaw
+pre-installed using `deploy.sh`.
 
 ## Environment Setup
 
@@ -46,8 +47,8 @@ rm key.json
 
 ```bash
 bash deploy.sh --project "${GCP_PROJECT_ID}"
-# or with custom zone/name:
-bash deploy.sh --project "${GCP_PROJECT_ID}" --zone us-west1-b --name my-vps
+# or with custom zone/name/machine-type:
+bash deploy.sh --project "${GCP_PROJECT_ID}" --zone us-west1-b --name my-vps --machine-type e2-small
 ```
 
 The script is **idempotent** — safe to run multiple times.
@@ -78,6 +79,21 @@ gcloud projects get-iam-policy "${GCP_PROJECT_ID}" \
   --flatten="bindings[].members" \
   --filter="bindings.role:roles/iap.tunnelResourceAccessor" \
   --format="table(bindings.members)"
+
+# Cloud NAT
+gcloud compute routers nats describe iap-vps-nat \
+  --router=iap-vps-router --region=us-central1 \
+  --project="${GCP_PROJECT_ID}"
+
+# OpenClaw startup script output (from serial console)
+gcloud compute instances get-serial-port-output iap-vps \
+  --zone=us-central1-a --project="${GCP_PROJECT_ID}" \
+  | grep openclaw-startup
+
+# OpenClaw service status (via SSH)
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo systemctl status openclaw-gateway
 ```
 
 ## Cleanup
@@ -86,5 +102,10 @@ gcloud projects get-iam-policy "${GCP_PROJECT_ID}" \
 gcloud compute instances delete iap-vps --zone=us-central1-a \
   --project="${GCP_PROJECT_ID}" --quiet
 gcloud compute firewall-rules delete allow-iap-ssh allow-iap-ssh-deny-public \
+  --project="${GCP_PROJECT_ID}" --quiet
+gcloud compute routers nats delete iap-vps-nat \
+  --router=iap-vps-router --region=us-central1 \
+  --project="${GCP_PROJECT_ID}" --quiet
+gcloud compute routers delete iap-vps-router --region=us-central1 \
   --project="${GCP_PROJECT_ID}" --quiet
 ```
