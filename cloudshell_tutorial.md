@@ -68,13 +68,33 @@ The script is **idempotent** — safe to run multiple times.
 
 ---
 
-## Step 4 — Add your API keys
+## Step 4 — Configure OpenClaw
 
-Each secret in the project becomes an environment variable for OpenClaw (injected at startup, never written to disk). Create one secret per key:
+First, SSH into the VM and run the OpenClaw setup wizard to register the gateway:
 
 ```bash
+gcloud compute ssh iap-vps --zone=us-central1-a --tunnel-through-iap
+sudo -u openclaw openclaw setup
+```
+
+Copy the gateway token printed at the end of setup, then store it and your API keys as secrets. Each secret in the project becomes an environment variable for OpenClaw (injected at startup, never written to disk).
+
+**Using the CLI:**
+
+```bash
+gcloud secrets create OPENCLAW_GATEWAY_TOKEN --data-file=- <<< '<token-from-setup>'
 gcloud secrets create ANTHROPIC_API_KEY --data-file=- <<< 'sk-ant-...'
-gcloud secrets create TELEGRAM_BOT_TOKEN --data-file=- <<< '123456:ABC-DEF...'
+```
+
+**Or using the GCP Console:**
+
+Open [Secret Manager](https://console.cloud.google.com/security/secret-manager), click **Create Secret**, and add each key-value pair.
+
+Then restart the service to load the new secrets:
+
+```bash
+gcloud compute ssh iap-vps --tunnel-through-iap \
+  -- sudo systemctl restart openclaw-gateway
 ```
 
 ---
