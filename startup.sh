@@ -15,6 +15,9 @@ METADATA_HEADER="Metadata-Flavor: Google"
 log() { logger -t "${LOG_TAG}" "$*"; echo "[${LOG_TAG}] $*"; }
 
 # ─── Fetch secrets from Secret Manager (runs every boot) ────────────────────
+# Every secret in the project becomes an environment variable:
+#   Secret name "ANTHROPIC_API_KEY" with value "sk-ant-..." → ANTHROPIC_API_KEY=sk-ant-...
+# This project should be dedicated to this deployment — all secrets are loaded.
 fetch_secrets() {
   log "Fetching secrets from Secret Manager…"
 
@@ -43,33 +46,59 @@ fetch_secrets() {
     return 1
   fi
 
-  # Fetch the openclaw-env secret from Secret Manager REST API
-  local secret_url="https://secretmanager.googleapis.com/v1/projects/${project_id}/secrets/openclaw-env/versions/latest:access"
-  local response
-  response="$(curl -sf \
+  local sm_base="https://secretmanager.googleapis.com/v1/projects/${project_id}"
+
+  # List all secrets in the project
+  local list_response
+  list_response="$(curl -sf \
     -H "Authorization: Bearer ${token}" \
-    -H "Content-Type: application/json" \
-    "${secret_url}" 2>/dev/null)" || {
-    log "Could not fetch openclaw-env secret (may not exist yet)."
+    "${sm_base}/secrets" 2>/dev/null)" || {
+    log "Could not list secrets (API may not be enabled or no secrets exist)."
     return 1
   }
 
-  # Extract the base64-encoded payload and decode it
-  local payload
-  payload="$(echo "${response}" | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')"
+  # Extract secret names from JSON (projects/PROJECT/secrets/NAME → NAME)
+  local secret_names
+  secret_names="$(echo "${list_response}" \
+    | grep -o '"name":"projects/[^"]*/secrets/[^"]*"' \
+    | sed 's|"name":"projects/[^"]*/secrets/||;s|"$||')"
 
-  if [[ -z "${payload}" ]]; then
-    log "Secret openclaw-env has empty payload — skipping."
+  if [[ -z "${secret_names}" ]]; then
+    log "No secrets found in project — skipping."
     return 1
   fi
 
-  echo "${payload}" | base64 -d > "${SECRETS_ENV}"
+  # Fetch each secret's latest version and assemble the env file
+  local tmp_env="${SECRETS_ENV}.tmp"
+  : > "${tmp_env}"
+  local count=0
+
+  while IFS= read -r secret_name; do
+    local response
+    response="$(curl -sf \
+      -H "Authorization: Bearer ${token}" \
+      "${sm_base}/secrets/${secret_name}/versions/latest:access" 2>/dev/null)" || {
+      log "  Skipping '${secret_name}' (no accessible version)."
+      continue
+    }
+
+    local payload
+    payload="$(echo "${response}" | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')"
+
+    if [[ -n "${payload}" ]]; then
+      local value
+      value="$(echo "${payload}" | base64 -d)"
+      echo "${secret_name}=${value}" >> "${tmp_env}"
+      count=$((count + 1))
+    fi
+  done <<< "${secret_names}"
+
+  # Atomic replace
+  mv "${tmp_env}" "${SECRETS_ENV}"
   chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${SECRETS_ENV}"
   chmod 600 "${SECRETS_ENV}"
 
-  local key_count
-  key_count="$(grep -c '=' "${SECRETS_ENV}" 2>/dev/null || echo 0)"
-  log "Loaded ${key_count} environment variable(s) from Secret Manager."
+  log "Loaded ${count} secret(s) from Secret Manager."
   return 0
 }
 
@@ -108,8 +137,9 @@ protect_credential_paths() {
 install_fetch_script() {
   cat > /usr/local/bin/fetch-openclaw-secrets <<'FETCHSCRIPT'
 #!/bin/bash
-# Fetches openclaw-env from GCP Secret Manager and writes to /run/openclaw/env.
-# Called by systemd ExecStartPre before each gateway start.
+# Enumerates all secrets in the GCP project and writes them as NAME=VALUE
+# lines to /run/openclaw/env. Called by systemd ExecStartPre before each
+# gateway start. This project should be dedicated to this deployment.
 set -euo pipefail
 
 SECRETS_ENV="/run/openclaw/env"
@@ -124,15 +154,28 @@ TOKEN="$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/service-acco
   | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')" || exit 0
 [[ -z "${TOKEN}" ]] && exit 0
 
-RESPONSE="$(curl -sf \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  "https://secretmanager.googleapis.com/v1/projects/${PROJECT_ID}/secrets/openclaw-env/versions/latest:access" 2>/dev/null)" || exit 0
+SM_BASE="https://secretmanager.googleapis.com/v1/projects/${PROJECT_ID}"
 
-PAYLOAD="$(echo "${RESPONSE}" | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')"
-[[ -z "${PAYLOAD}" ]] && exit 0
+# List all secrets in the project
+LIST="$(curl -sf -H "Authorization: Bearer ${TOKEN}" "${SM_BASE}/secrets" 2>/dev/null)" || exit 0
+NAMES="$(echo "${LIST}" | grep -o '"name":"projects/[^"]*/secrets/[^"]*"' \
+  | sed 's|"name":"projects/[^"]*/secrets/||;s|"$||')"
+[[ -z "${NAMES}" ]] && exit 0
 
-echo "${PAYLOAD}" | base64 -d > "${SECRETS_ENV}"
+# Fetch each secret's latest version
+TMP="${SECRETS_ENV}.tmp"
+: > "${TMP}"
+
+while IFS= read -r SECRET_NAME; do
+  RESP="$(curl -sf -H "Authorization: Bearer ${TOKEN}" \
+    "${SM_BASE}/secrets/${SECRET_NAME}/versions/latest:access" 2>/dev/null)" || continue
+  PAYLOAD="$(echo "${RESP}" | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')"
+  [[ -z "${PAYLOAD}" ]] && continue
+  VALUE="$(echo "${PAYLOAD}" | base64 -d)"
+  echo "${SECRET_NAME}=${VALUE}" >> "${TMP}"
+done <<< "${NAMES}"
+
+mv "${TMP}" "${SECRETS_ENV}"
 chown openclaw:openclaw "${SECRETS_ENV}"
 chmod 600 "${SECRETS_ENV}"
 FETCHSCRIPT
@@ -151,7 +194,21 @@ protect_credential_paths
 # ─── Already provisioned? Just ensure the service is running ─────────────────
 if [ -f "${SENTINEL_FILE}" ]; then
   log "Already provisioned. Ensuring service is running."
-  systemctl start openclaw-gateway.service 2>/dev/null || true
+
+  # Self-repair: ensure the service unit has --allow-unconfigured
+  UNIT_FILE="/etc/systemd/system/openclaw-gateway.service"
+  if [ -f "${UNIT_FILE}" ] && ! grep -q -- '--allow-unconfigured' "${UNIT_FILE}"; then
+    log "Updating service unit: adding --allow-unconfigured flag."
+    sed -i 's|gateway --port 18789 --verbose|gateway --port 18789 --verbose --allow-unconfigured|' "${UNIT_FILE}"
+    if ! grep -q 'StartLimitBurst' "${UNIT_FILE}"; then
+      sed -i '/^Wants=network-online.target$/a StartLimitIntervalSec=300\nStartLimitBurst=5' "${UNIT_FILE}"
+    fi
+    systemctl daemon-reload
+    systemctl restart openclaw-gateway.service 2>/dev/null || true
+  else
+    systemctl start openclaw-gateway.service 2>/dev/null || true
+  fi
+
   exit 0
 fi
 
@@ -192,6 +249,8 @@ cat > /etc/systemd/system/openclaw-gateway.service <<UNIT
 Description=OpenClaw Gateway
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -205,7 +264,7 @@ ExecStartPre=+/usr/local/bin/fetch-openclaw-secrets
 # Load secrets from tmpfs (- prefix: don't fail if file is missing)
 EnvironmentFile=-${SECRETS_ENV}
 
-ExecStart=${OPENCLAW_BIN} gateway --port 18789 --verbose
+ExecStart=${OPENCLAW_BIN} gateway --port 18789 --verbose --allow-unconfigured
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production
