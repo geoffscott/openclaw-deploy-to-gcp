@@ -110,7 +110,7 @@ if gcloud services list --project="${PROJECT_ID}" --filter="name:secretmanager.g
          --project="${PROJECT_ID}" --quiet 2>/dev/null; then
       echo "  ✓ Created service account ${VM_SA_NAME}"
     else
-      echo "  ⚠  Could not create service account (need iam.googleapis.com API)."
+      echo "  ⚠  Could not create service account (deployer may lack iam.serviceAccountAdmin role)."
     fi
   fi
 
@@ -126,11 +126,17 @@ if gcloud services list --project="${PROJECT_ID}" --filter="name:secretmanager.g
         --quiet 2>/dev/null || true
     done
 
-    # The deployer SA needs iam.serviceAccountUser on the VM SA to attach it
+    # The deployer needs iam.serviceAccountUser on the VM SA to attach it
     DEPLOYER_EMAIL="$(gcloud config get-value account 2>/dev/null)"
     if [[ -n "${DEPLOYER_EMAIL}" ]]; then
+      # Detect whether the active account is a service account or a user
+      if [[ "${DEPLOYER_EMAIL}" == *"iam.gserviceaccount.com" ]]; then
+        MEMBER_PREFIX="serviceAccount"
+      else
+        MEMBER_PREFIX="user"
+      fi
       gcloud iam service-accounts add-iam-policy-binding "${VM_SA_EMAIL}" \
-        --member="serviceAccount:${DEPLOYER_EMAIL}" \
+        --member="${MEMBER_PREFIX}:${DEPLOYER_EMAIL}" \
         --role="roles/iam.serviceAccountUser" \
         --project="${PROJECT_ID}" \
         --quiet 2>/dev/null || true

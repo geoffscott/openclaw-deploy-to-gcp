@@ -15,24 +15,27 @@ be set as secrets in the Claude Code environment settings:
 | `GCP_SERVICE_ACCOUNT_KEY` | Service account JSON key, **base64-encoded** |
 | `GCP_PROJECT_ID` | GCP project ID (e.g. `my-project-123`) |
 
-### Creating the service account and key (one-time setup)
+### Creating the deployer service account and key (one-time setup)
+
+This creates a service account that `deploy.sh` uses to provision infrastructure.
+The script separately creates a second SA (`iap-vps-vm-sa`) for the VM at runtime.
 
 ```bash
-# Create service account
-gcloud iam service-accounts create claude-deployer \
-  --display-name="Claude Code Deployer" \
+# Create deployer service account
+gcloud iam service-accounts create openclaw-deployer \
+  --display-name="OpenClaw Deployer" \
   --project=YOUR_PROJECT_ID
 
 # Grant required roles
 for ROLE in roles/compute.admin roles/iam.securityAdmin roles/serviceusage.serviceUsageAdmin roles/iam.serviceAccountAdmin roles/secretmanager.admin; do
   gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-    --member="serviceAccount:claude-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+    --member="serviceAccount:openclaw-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
     --role="${ROLE}"
 done
 
 # Download key and base64-encode it for the env var
 gcloud iam service-accounts keys create key.json \
-  --iam-account="claude-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com"
+  --iam-account="openclaw-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com"
 
 base64 -w 0 key.json   # copy this output → GCP_SERVICE_ACCOUNT_KEY secret
 rm key.json
