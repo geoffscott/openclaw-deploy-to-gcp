@@ -194,7 +194,21 @@ protect_credential_paths
 # ─── Already provisioned? Just ensure the service is running ─────────────────
 if [ -f "${SENTINEL_FILE}" ]; then
   log "Already provisioned. Ensuring service is running."
-  systemctl start openclaw-gateway.service 2>/dev/null || true
+
+  # Self-repair: ensure the service unit has --allow-unconfigured
+  UNIT_FILE="/etc/systemd/system/openclaw-gateway.service"
+  if [ -f "${UNIT_FILE}" ] && ! grep -q -- '--allow-unconfigured' "${UNIT_FILE}"; then
+    log "Updating service unit: adding --allow-unconfigured flag."
+    sed -i 's|gateway --port 18789 --verbose|gateway --port 18789 --verbose --allow-unconfigured|' "${UNIT_FILE}"
+    if ! grep -q 'StartLimitBurst' "${UNIT_FILE}"; then
+      sed -i '/^Wants=network-online.target$/a StartLimitIntervalSec=300\nStartLimitBurst=5' "${UNIT_FILE}"
+    fi
+    systemctl daemon-reload
+    systemctl restart openclaw-gateway.service 2>/dev/null || true
+  else
+    systemctl start openclaw-gateway.service 2>/dev/null || true
+  fi
+
   exit 0
 fi
 
@@ -235,6 +249,8 @@ cat > /etc/systemd/system/openclaw-gateway.service <<UNIT
 Description=OpenClaw Gateway
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -248,7 +264,7 @@ ExecStartPre=+/usr/local/bin/fetch-openclaw-secrets
 # Load secrets from tmpfs (- prefix: don't fail if file is missing)
 EnvironmentFile=-${SECRETS_ENV}
 
-ExecStart=${OPENCLAW_BIN} gateway --port 18789 --verbose
+ExecStart=${OPENCLAW_BIN} gateway --port 18789 --verbose --allow-unconfigured
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production
