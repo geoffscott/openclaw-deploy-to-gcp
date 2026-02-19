@@ -105,13 +105,11 @@ if gcloud services list --project="${PROJECT_ID}" --filter="name:secretmanager.g
        --project="${PROJECT_ID}" &>/dev/null 2>&1; then
     echo "  Service account ${VM_SA_NAME} already exists."
   else
-    if gcloud iam service-accounts create "${VM_SA_NAME}" \
+    SA_CREATE_ERR="$(gcloud iam service-accounts create "${VM_SA_NAME}" \
          --display-name="OpenClaw VM (${INSTANCE_NAME})" \
-         --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-      echo "  ✓ Created service account ${VM_SA_NAME}"
-    else
-      echo "  ⚠  Could not create service account (need iam.googleapis.com API)."
-    fi
+         --project="${PROJECT_ID}" --quiet 2>&1)" && \
+      echo "  ✓ Created service account ${VM_SA_NAME}" || \
+      echo "  ⚠  Could not create service account (deployer may lack iam.serviceAccountAdmin role)."
   fi
 
   # Grant secretmanager.secretAccessor (read values) and secretmanager.viewer
