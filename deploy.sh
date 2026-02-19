@@ -20,9 +20,6 @@ BOOT_DISK_SIZE="${BOOT_DISK_SIZE:-20GB}"
 # IAP's published IP range for TCP forwarding (SSH tunnelling)
 IAP_CIDR="35.235.240.0/20"
 
-# Secret Manager secret name (KEY=VALUE env file format)
-SECRET_NAME="openclaw-env"
-
 # ─── Parse flags ─────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -90,7 +87,10 @@ else
   fi
 fi
 
-# ─── Secret Manager: create VM service account and secret ────────────────────
+# ─── Secret Manager: create VM service account ──────────────────────────────
+# Each secret in this project becomes an env var (NAME=value). No manifest or
+# bundle — the VM enumerates all secrets at startup. This project should be
+# dedicated to this deployment.
 echo ""
 echo "▶ Setting up Secret Manager for OpenClaw secrets…"
 
@@ -114,14 +114,17 @@ if gcloud services list --project="${PROJECT_ID}" --filter="name:secretmanager.g
     fi
   fi
 
-  # Grant secretmanager.secretAccessor to the VM service account
+  # Grant secretmanager.secretAccessor (read values) and secretmanager.viewer
+  # (list secrets) to the VM service account
   if gcloud iam service-accounts describe "${VM_SA_EMAIL}" \
        --project="${PROJECT_ID}" &>/dev/null 2>&1; then
-    gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-      --member="serviceAccount:${VM_SA_EMAIL}" \
-      --role="roles/secretmanager.secretAccessor" \
-      --condition=None \
-      --quiet 2>/dev/null || true
+    for SM_ROLE in roles/secretmanager.secretAccessor roles/secretmanager.viewer; do
+      gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+        --member="serviceAccount:${VM_SA_EMAIL}" \
+        --role="${SM_ROLE}" \
+        --condition=None \
+        --quiet 2>/dev/null || true
+    done
 
     # The deployer SA needs iam.serviceAccountUser on the VM SA to attach it
     DEPLOYER_EMAIL="$(gcloud config get-value account 2>/dev/null)"
@@ -133,21 +136,6 @@ if gcloud services list --project="${PROJECT_ID}" --filter="name:secretmanager.g
         --quiet 2>/dev/null || true
     fi
     SM_READY=true
-  fi
-
-  # Create the openclaw-env secret (empty placeholder)
-  if gcloud secrets describe "${SECRET_NAME}" \
-       --project="${PROJECT_ID}" &>/dev/null 2>&1; then
-    echo "  Secret '${SECRET_NAME}' already exists."
-  else
-    if echo -n "" | gcloud secrets create "${SECRET_NAME}" \
-         --project="${PROJECT_ID}" \
-         --data-file=- \
-         --quiet 2>/dev/null; then
-      echo "  ✓ Created secret '${SECRET_NAME}' (empty — populate it with your API keys)"
-    else
-      echo "  ⚠  Could not create secret (check permissions)."
-    fi
   fi
 
   if [[ "${SM_READY}" == "true" ]]; then
@@ -168,12 +156,11 @@ if [[ "${SM_READY}" != "true" ]]; then
   echo "      --display-name='OpenClaw VM (${INSTANCE_NAME})' \\"
   echo "      --project=${PROJECT_ID}"
   echo ""
-  echo "    gcloud projects add-iam-policy-binding ${PROJECT_ID} \\"
-  echo "      --member='serviceAccount:${VM_SA_EMAIL}' \\"
-  echo "      --role='roles/secretmanager.secretAccessor'"
-  echo ""
-  echo "    gcloud secrets create ${SECRET_NAME} --project=${PROJECT_ID} \\"
-  echo "      --data-file=- <<< 'ANTHROPIC_API_KEY=your-key-here'"
+  echo "    for ROLE in roles/secretmanager.secretAccessor roles/secretmanager.viewer; do"
+  echo "      gcloud projects add-iam-policy-binding ${PROJECT_ID} \\"
+  echo "        --member='serviceAccount:${VM_SA_EMAIL}' \\"
+  echo "        --role=\"\${ROLE}\""
+  echo "    done"
   echo ""
   echo "  Then re-run this script to attach the service account to the VM."
 fi
@@ -356,17 +343,23 @@ echo "  The tunnel stays open as long as the SSH session is active."
 echo ""
 echo "  ── Secrets Management ──────────────────────────────────"
 echo ""
-echo "  Add your API keys to Secret Manager (never stored on disk):"
+echo "  Each secret in this project becomes an environment variable."
+echo "  Create one secret per key (never stored on disk):"
 echo ""
-echo "    gcloud secrets versions add ${SECRET_NAME} \\"
-echo "      --project=${PROJECT_ID} --data-file=- <<'EOF'"
-echo "    ANTHROPIC_API_KEY=sk-ant-..."
-echo "    TELEGRAM_BOT_TOKEN=..."
-echo "    EOF"
+echo "    gcloud secrets create ANTHROPIC_API_KEY \\"
+echo "      --project=${PROJECT_ID} \\"
+echo "      --data-file=- <<< 'sk-ant-...'"
+echo ""
+echo "    gcloud secrets create SLACK_BOT_TOKEN \\"
+echo "      --project=${PROJECT_ID} \\"
+echo "      --data-file=- <<< 'xoxb-...'"
 echo ""
 echo "  Then restart the service to pick up new secrets:"
 echo ""
 echo "    gcloud compute ssh ${INSTANCE_NAME} --tunnel-through-iap \\"
 echo "      --project=${PROJECT_ID} --zone=${ZONE} \\"
 echo "      -- sudo systemctl restart openclaw-gateway"
+echo ""
+echo "  ⚠  This project should be dedicated to this deployment."
+echo "     All secrets in the project are loaded into OpenClaw."
 echo "════════════════════════════════════════════════════════════"

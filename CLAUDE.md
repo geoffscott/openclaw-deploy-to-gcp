@@ -61,20 +61,21 @@ The script is **idempotent** — safe to run multiple times.
 
 ## Managing OpenClaw secrets
 
-Secrets are stored in Secret Manager as a single `openclaw-env` secret in
-`KEY=VALUE` format. They are fetched at each service start and loaded into
-the process via `/run/openclaw/env` (tmpfs — RAM only, never on disk).
+Each secret in the GCP project becomes an environment variable. The VM
+enumerates all secrets at startup and writes them to `/run/openclaw/env`
+(tmpfs — RAM only, never on disk). This project should be dedicated to
+this deployment.
 
 ```bash
-# Add or update secrets
-gcloud secrets versions add openclaw-env \
-  --project="${GCP_PROJECT_ID}" --data-file=- <<'EOF'
-ANTHROPIC_API_KEY=sk-ant-...
-TELEGRAM_BOT_TOKEN=...
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
-OPENCLAW_GATEWAY_TOKEN=...
-EOF
+# Add a new secret
+gcloud secrets create ANTHROPIC_API_KEY \
+  --project="${GCP_PROJECT_ID}" \
+  --data-file=- <<< 'sk-ant-...'
+
+# Update an existing secret
+gcloud secrets versions add ANTHROPIC_API_KEY \
+  --project="${GCP_PROJECT_ID}" \
+  --data-file=- <<< 'sk-ant-new-key...'
 
 # Restart service to pick up new secrets
 gcloud compute ssh iap-vps --zone=us-central1-a \
@@ -122,8 +123,8 @@ gcloud compute routers nats describe iap-vps-nat \
   --router=iap-vps-router --region=us-central1 \
   --project="${GCP_PROJECT_ID}"
 
-# Secret Manager secret
-gcloud secrets describe openclaw-env --project="${GCP_PROJECT_ID}"
+# Secret Manager secrets (list all)
+gcloud secrets list --project="${GCP_PROJECT_ID}" --format="table(name)"
 
 # OpenClaw startup script output (from serial console)
 gcloud compute instances get-serial-port-output iap-vps \
@@ -148,8 +149,9 @@ gcloud compute routers nats delete iap-vps-nat \
   --project="${GCP_PROJECT_ID}" --quiet
 gcloud compute routers delete iap-vps-router --region=us-central1 \
   --project="${GCP_PROJECT_ID}" --quiet
-gcloud secrets delete openclaw-env \
-  --project="${GCP_PROJECT_ID}" --quiet
+for SECRET in $(gcloud secrets list --project="${GCP_PROJECT_ID}" --format="value(name)"); do
+  gcloud secrets delete "${SECRET}" --project="${GCP_PROJECT_ID}" --quiet
+done
 gcloud iam service-accounts delete iap-vps-vm-sa@${GCP_PROJECT_ID}.iam.gserviceaccount.com \
   --project="${GCP_PROJECT_ID}" --quiet
 ```

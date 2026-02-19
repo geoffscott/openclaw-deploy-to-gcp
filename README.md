@@ -20,8 +20,8 @@ Click the button below to open this repo in Cloud Shell and follow the interacti
 |----------|---------|
 | **VM instance** | `e2-medium` (2 vCPU, 4 GB), Debian 12, Shielded VM, **no external IP**, 20 GB SSD |
 | **OpenClaw** | Installed via startup script; runs as `openclaw-gateway` systemd service on port 18789 |
-| **Secret Manager** | `openclaw-env` secret for API keys; fetched at each service start, stored only in RAM |
-| **VM service account** | `iap-vps-vm-sa` with `secretmanager.secretAccessor` only |
+| **Secret Manager** | One secret per key (e.g. `ANTHROPIC_API_KEY`); all enumerated at service start, stored only in RAM |
+| **VM service account** | `iap-vps-vm-sa` with `secretmanager.secretAccessor` + `secretmanager.viewer` |
 | **Cloud NAT** | Outbound-only internet for the private VM (package downloads, API calls) |
 | **Cloud Router** | Required by Cloud NAT |
 | **Firewall (allow)** | SSH (`tcp:22`) from IAP range `35.235.240.0/20` only |
@@ -35,7 +35,7 @@ APIs enabled automatically: `compute.googleapis.com`, `iap.googleapis.com`, `sec
 
 ## Prerequisites
 
-- A GCP project with [billing enabled](https://cloud.google.com/billing/docs/how-to/manage-billing-account)
+- A **dedicated GCP project** with [billing enabled](https://cloud.google.com/billing/docs/how-to/manage-billing-account) — the VM loads *every* secret in the project as an environment variable, so this project should not be shared with other workloads
 - Owner or Editor role on the project (to enable APIs and create resources)
 
 ---
@@ -113,24 +113,39 @@ Then open [http://localhost:8080](http://localhost:8080) instead.
 
 ## Secrets management
 
-API keys and bot tokens are stored in GCP Secret Manager as a single secret called `openclaw-env` in `KEY=VALUE` format. On each service start, the `fetch-openclaw-secrets` helper pulls the latest version from Secret Manager and writes it to `/run/openclaw/env` (tmpfs — RAM-backed, never on persistent disk). The systemd unit loads this file via `EnvironmentFile`.
+Each secret in the GCP project becomes an environment variable for OpenClaw. Create one secret per key — the VM enumerates all secrets at startup and assembles them into `/run/openclaw/env` (tmpfs — RAM-backed, never on persistent disk). The systemd unit loads this file via `EnvironmentFile`.
 
-**Add or update secrets:**
+> **Important:** This project should be dedicated to this deployment. All secrets in the project are loaded into the OpenClaw process.
+
+**Add a secret:**
 
 ```bash
-gcloud secrets versions add openclaw-env \
-  --project=YOUR_PROJECT_ID --data-file=- <<'EOF'
-ANTHROPIC_API_KEY=sk-ant-...
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
-OPENCLAW_GATEWAY_TOKEN=...
-EOF
+gcloud secrets create ANTHROPIC_API_KEY \
+  --project=YOUR_PROJECT_ID \
+  --data-file=- <<< 'sk-ant-...'
+```
+
+**Common secrets for OpenClaw:**
+
+```bash
+gcloud secrets create ANTHROPIC_API_KEY --project=YOUR_PROJECT_ID --data-file=- <<< 'sk-ant-...'
+gcloud secrets create TELEGRAM_BOT_TOKEN --project=YOUR_PROJECT_ID --data-file=- <<< '123456:ABC-DEF...'
+gcloud secrets create SLACK_BOT_TOKEN --project=YOUR_PROJECT_ID --data-file=- <<< 'xoxb-...'
+gcloud secrets create SLACK_APP_TOKEN --project=YOUR_PROJECT_ID --data-file=- <<< 'xapp-...'
+gcloud secrets create OPENCLAW_GATEWAY_TOKEN --project=YOUR_PROJECT_ID --data-file=- <<< '...'
 ```
 
 > **Note:** This VM has no public IP, so Slack must use **Socket Mode** (the default). Socket Mode requires a `SLACK_APP_TOKEN` (`xapp-...`) — do not use `SLACK_SIGNING_SECRET`, which is for HTTP Events API mode and requires a publicly reachable URL.
 
-**Pick up new secrets** (no reboot needed):
+**Update an existing secret:**
+
+```bash
+gcloud secrets versions add ANTHROPIC_API_KEY \
+  --project=YOUR_PROJECT_ID \
+  --data-file=- <<< 'sk-ant-new-key...'
+```
+
+**Pick up new or updated secrets** (no reboot needed):
 
 ```bash
 gcloud compute ssh iap-vps --tunnel-through-iap \
@@ -206,8 +221,12 @@ gcloud compute routers nats delete iap-vps-nat \
   --router=iap-vps-router --region=us-central1 --quiet
 gcloud compute routers delete iap-vps-router --region=us-central1 --quiet
 
-# Delete Secret Manager secret and VM service account
-gcloud secrets delete openclaw-env --quiet
+# Delete all secrets
+for SECRET in $(gcloud secrets list --project=YOUR_PROJECT_ID --format="value(name)"); do
+  gcloud secrets delete "${SECRET}" --project=YOUR_PROJECT_ID --quiet
+done
+
+# Delete VM service account
 gcloud iam service-accounts delete iap-vps-vm-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com --quiet
 ```
 

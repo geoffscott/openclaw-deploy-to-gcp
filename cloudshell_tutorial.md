@@ -31,7 +31,7 @@ Key actions performed by the script:
 | Step | What happens |
 |------|-------------|
 | Enable APIs | `compute`, `iap`, `secretmanager`, `iam` |
-| Secret Manager | Creates `openclaw-env` secret and a VM service account |
+| Secret Manager | Creates a VM service account for reading secrets |
 | Firewall (allow) | SSH (`tcp:22`) from IAP range `35.235.240.0/20` only |
 | Firewall (deny) | Direct SSH from `0.0.0.0/0` blocked |
 | Cloud NAT | Outbound-only internet for the private VM |
@@ -70,13 +70,11 @@ The script is **idempotent** — safe to run multiple times.
 
 ## Step 4 — Add your API keys
 
-Store your secrets in Secret Manager (they're injected into OpenClaw at startup, never written to disk):
+Each secret in the project becomes an environment variable for OpenClaw (injected at startup, never written to disk). Create one secret per key:
 
 ```bash
-gcloud secrets versions add openclaw-env --data-file=- <<'EOF'
-ANTHROPIC_API_KEY=sk-ant-...
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
-EOF
+gcloud secrets create ANTHROPIC_API_KEY --data-file=- <<< 'sk-ant-...'
+gcloud secrets create TELEGRAM_BOT_TOKEN --data-file=- <<< '123456:ABC-DEF...'
 ```
 
 ---
@@ -150,8 +148,10 @@ gcloud compute routers nats delete iap-vps-nat \
   --router=iap-vps-router --region=us-central1 --quiet
 gcloud compute routers delete iap-vps-router --region=us-central1 --quiet
 
-# Delete Secret Manager secret and VM service account
-gcloud secrets delete openclaw-env --quiet
+# Delete all secrets and VM service account
+for SECRET in $(gcloud secrets list --format="value(name)"); do
+  gcloud secrets delete "${SECRET}" --quiet
+done
 gcloud iam service-accounts delete iap-vps-vm-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com --quiet
 ```
 

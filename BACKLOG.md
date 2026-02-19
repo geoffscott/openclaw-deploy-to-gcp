@@ -44,3 +44,23 @@ deployment and wants to consolidate access through a single control plane.
 
 **SOC 2 notes:** Inherits the access controls, MFA, and audit logging of the
 existing VPN/BeyondCorp infrastructure. No additional public surface.
+
+---
+
+## Secrets Management — Future Options
+
+### Per-Secret IAM Restrictions
+
+Currently the VM service account has project-level `secretmanager.secretAccessor`
+and `secretmanager.viewer`, meaning it can read all secrets in the project. Since
+the project is dedicated to this deployment, this is fine.
+
+If future requirements demand finer-grained access (e.g., certain secrets readable
+only by specific services), consider:
+
+- IAM conditions scoped to individual secret resource names
+- Separate service accounts per service, each with access to only its secrets
+- Secret Manager labels + IAM conditions to group secrets by access tier
+
+This would require changes to the fetch script (filtering by label or explicit list)
+and deploy.sh (per-secret IAM bindings instead of project-level).
