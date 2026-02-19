@@ -20,6 +20,9 @@ BOOT_DISK_SIZE="${BOOT_DISK_SIZE:-20GB}"
 # IAP's published IP range for TCP forwarding (SSH tunnelling)
 IAP_CIDR="35.235.240.0/20"
 
+# Secret Manager secret name (KEY=VALUE env file format)
+SECRET_NAME="openclaw-env"
+
 # ─── Parse flags ─────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,6 +45,8 @@ if [[ -z "${PROJECT_ID:-}" ]]; then
 fi
 
 REGION="${ZONE%-*}"   # strip zone suffix, e.g. us-central1-a → us-central1
+VM_SA_NAME="${INSTANCE_NAME}-vm-sa"
+VM_SA_EMAIL="${VM_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
@@ -58,28 +63,119 @@ echo ""
 
 # ─── Enable required APIs ────────────────────────────────────────────────────
 echo "▶ Enabling required APIs…"
-if gcloud services enable \
-  compute.googleapis.com \
-  iap.googleapis.com \
+
+REQUIRED_APIS="compute.googleapis.com iap.googleapis.com secretmanager.googleapis.com iam.googleapis.com"
+
+if gcloud services enable ${REQUIRED_APIS} \
   --project="${PROJECT_ID}" \
   --quiet 2>/dev/null; then
   echo "  ✓ APIs enabled"
 else
   echo "  ⚠  Could not enable APIs (may lack serviceusage permissions)."
   echo "     Checking if they are already enabled…"
-  MISSING=0
-  for API in compute.googleapis.com iap.googleapis.com; do
+  MISSING_APIS=""
+  for API in ${REQUIRED_APIS}; do
     if ! gcloud services list --project="${PROJECT_ID}" --filter="name:${API}" --format="value(name)" 2>/dev/null | grep -q "${API}"; then
-      echo "     ✗ ${API} is NOT enabled — enable it manually."
-      MISSING=1
+      MISSING_APIS="${MISSING_APIS} ${API}"
     fi
   done
-  if [[ "${MISSING}" -eq 1 ]]; then
-    echo "  ERROR: Required APIs are not enabled. Ask a project Owner to run:"
-    echo "    gcloud services enable compute.googleapis.com iap.googleapis.com --project=${PROJECT_ID}"
-    exit 1
+  if [[ -n "${MISSING_APIS}" ]]; then
+    echo "  ⚠  Missing APIs:${MISSING_APIS}"
+    echo "     A project Owner should run:"
+    echo "       gcloud services enable${MISSING_APIS} --project=${PROJECT_ID}"
+    echo ""
+    echo "     Continuing with available APIs…"
+  else
+    echo "  ✓ APIs already enabled"
   fi
-  echo "  ✓ APIs already enabled"
+fi
+
+# ─── Secret Manager: create VM service account and secret ────────────────────
+echo ""
+echo "▶ Setting up Secret Manager for OpenClaw secrets…"
+
+SM_READY=false
+
+# Check if Secret Manager API is available
+if gcloud services list --project="${PROJECT_ID}" --filter="name:secretmanager.googleapis.com" \
+   --format="value(name)" 2>/dev/null | grep -q "secretmanager"; then
+
+  # Create VM service account (for Secret Manager access)
+  if gcloud iam service-accounts describe "${VM_SA_EMAIL}" \
+       --project="${PROJECT_ID}" &>/dev/null 2>&1; then
+    echo "  Service account ${VM_SA_NAME} already exists."
+  else
+    if gcloud iam service-accounts create "${VM_SA_NAME}" \
+         --display-name="OpenClaw VM (${INSTANCE_NAME})" \
+         --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+      echo "  ✓ Created service account ${VM_SA_NAME}"
+    else
+      echo "  ⚠  Could not create service account (need iam.googleapis.com API)."
+    fi
+  fi
+
+  # Grant secretmanager.secretAccessor to the VM service account
+  if gcloud iam service-accounts describe "${VM_SA_EMAIL}" \
+       --project="${PROJECT_ID}" &>/dev/null 2>&1; then
+    gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+      --member="serviceAccount:${VM_SA_EMAIL}" \
+      --role="roles/secretmanager.secretAccessor" \
+      --condition=None \
+      --quiet 2>/dev/null || true
+
+    # The deployer SA needs iam.serviceAccountUser on the VM SA to attach it
+    DEPLOYER_EMAIL="$(gcloud config get-value account 2>/dev/null)"
+    if [[ -n "${DEPLOYER_EMAIL}" ]]; then
+      gcloud iam service-accounts add-iam-policy-binding "${VM_SA_EMAIL}" \
+        --member="serviceAccount:${DEPLOYER_EMAIL}" \
+        --role="roles/iam.serviceAccountUser" \
+        --project="${PROJECT_ID}" \
+        --quiet 2>/dev/null || true
+    fi
+    SM_READY=true
+  fi
+
+  # Create the openclaw-env secret (empty placeholder)
+  if gcloud secrets describe "${SECRET_NAME}" \
+       --project="${PROJECT_ID}" &>/dev/null 2>&1; then
+    echo "  Secret '${SECRET_NAME}' already exists."
+  else
+    if echo -n "" | gcloud secrets create "${SECRET_NAME}" \
+         --project="${PROJECT_ID}" \
+         --data-file=- \
+         --quiet 2>/dev/null; then
+      echo "  ✓ Created secret '${SECRET_NAME}' (empty — populate it with your API keys)"
+    else
+      echo "  ⚠  Could not create secret (check permissions)."
+    fi
+  fi
+
+  if [[ "${SM_READY}" == "true" ]]; then
+    echo "  ✓ Secret Manager configured"
+  fi
+else
+  echo "  ⚠  Secret Manager API not enabled — skipping."
+fi
+
+if [[ "${SM_READY}" != "true" ]]; then
+  echo ""
+  echo "  To enable Secret Manager, a project Owner should run:"
+  echo ""
+  echo "    gcloud services enable secretmanager.googleapis.com iam.googleapis.com \\"
+  echo "      --project=${PROJECT_ID}"
+  echo ""
+  echo "    gcloud iam service-accounts create ${VM_SA_NAME} \\"
+  echo "      --display-name='OpenClaw VM (${INSTANCE_NAME})' \\"
+  echo "      --project=${PROJECT_ID}"
+  echo ""
+  echo "    gcloud projects add-iam-policy-binding ${PROJECT_ID} \\"
+  echo "      --member='serviceAccount:${VM_SA_EMAIL}' \\"
+  echo "      --role='roles/secretmanager.secretAccessor'"
+  echo ""
+  echo "    gcloud secrets create ${SECRET_NAME} --project=${PROJECT_ID} \\"
+  echo "      --data-file=- <<< 'ANTHROPIC_API_KEY=your-key-here'"
+  echo ""
+  echo "  Then re-run this script to attach the service account to the VM."
 fi
 
 # ─── Firewall: allow SSH only from IAP ───────────────────────────────────────
@@ -169,6 +265,18 @@ if gcloud compute instances describe "${INSTANCE_NAME}" \
      --project="${PROJECT_ID}" &>/dev/null; then
   echo "  Instance already exists — skipping creation."
 else
+  # Build service account flags
+  SA_FLAGS=()
+  if [[ "${SM_READY}" == "true" ]]; then
+    SA_FLAGS+=(--service-account="${VM_SA_EMAIL}")
+    SA_FLAGS+=(--scopes="https://www.googleapis.com/auth/cloud-platform")
+    echo "  Using service account: ${VM_SA_EMAIL}"
+  else
+    SA_FLAGS+=(--no-service-account)
+    SA_FLAGS+=(--no-scopes)
+    echo "  No service account (Secret Manager not configured)."
+  fi
+
   gcloud compute instances create "${INSTANCE_NAME}" \
     --project="${PROJECT_ID}" \
     --zone="${ZONE}" \
@@ -177,8 +285,7 @@ else
     --image-project="${IMAGE_PROJECT}" \
     --network="${NETWORK}" \
     --no-address \
-    --no-service-account \
-    --no-scopes \
+    "${SA_FLAGS[@]}" \
     --tags="iap-ssh" \
     --metadata="enable-oslogin=TRUE" \
     --metadata-from-file="startup-script=${SCRIPT_DIR}/startup.sh" \
@@ -234,7 +341,19 @@ echo ""
 echo "    sudo systemctl status openclaw-gateway"
 echo "    sudo journalctl -u openclaw-gateway -f"
 echo ""
-echo "  Configure API keys and messaging platforms:"
+echo "  ── Secrets Management ──────────────────────────────────"
 echo ""
-echo "    sudo -u openclaw openclaw config"
+echo "  Add your API keys to Secret Manager (never stored on disk):"
+echo ""
+echo "    gcloud secrets versions add ${SECRET_NAME} \\"
+echo "      --project=${PROJECT_ID} --data-file=- <<'EOF'"
+echo "    ANTHROPIC_API_KEY=sk-ant-..."
+echo "    TELEGRAM_BOT_TOKEN=..."
+echo "    EOF"
+echo ""
+echo "  Then restart the service to pick up new secrets:"
+echo ""
+echo "    gcloud compute ssh ${INSTANCE_NAME} --tunnel-through-iap \\"
+echo "      --project=${PROJECT_ID} --zone=${ZONE} \\"
+echo "      -- sudo systemctl restart openclaw-gateway"
 echo "════════════════════════════════════════════════════════════"

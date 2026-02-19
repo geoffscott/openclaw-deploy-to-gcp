@@ -1,6 +1,6 @@
 # Deploy an IAP-Only VPS with OpenClaw on GCP
 
-This tutorial walks you through deploying a secure virtual machine with [OpenClaw](https://openclaw.ai/) pre-installed. The VM is **only reachable through Google's [Identity-Aware Proxy (IAP)](https://cloud.google.com/iap)** — no public IP, no open SSH port on the internet.
+This tutorial walks you through deploying a secure virtual machine with [OpenClaw](https://openclaw.ai/) pre-installed. The VM is **only reachable through Google's [Identity-Aware Proxy (IAP)](https://cloud.google.com/iap)** — no public IP, no open SSH port on the internet. Secrets are stored in Secret Manager and never written to persistent disk.
 
 ---
 
@@ -30,7 +30,8 @@ Key actions performed by the script:
 
 | Step | What happens |
 |------|-------------|
-| Enable APIs | `compute.googleapis.com` and `iap.googleapis.com` |
+| Enable APIs | `compute`, `iap`, `secretmanager`, `iam` |
+| Secret Manager | Creates `openclaw-env` secret and a VM service account |
 | Firewall (allow) | SSH (`tcp:22`) from IAP range `35.235.240.0/20` only |
 | Firewall (deny) | Direct SSH from `0.0.0.0/0` blocked |
 | Cloud NAT | Outbound-only internet for the private VM |
@@ -67,7 +68,20 @@ The script is **idempotent** — safe to run multiple times.
 
 ---
 
-## Step 4 — Connect to your VPS
+## Step 4 — Add your API keys
+
+Store your secrets in Secret Manager (they're injected into OpenClaw at startup, never written to disk):
+
+```bash
+gcloud secrets versions add openclaw-env --data-file=- <<'EOF'
+ANTHROPIC_API_KEY=sk-ant-...
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+EOF
+```
+
+---
+
+## Step 5 — Connect to your VPS
 
 Once deployment finishes, SSH into the instance through IAP:
 
@@ -83,7 +97,7 @@ Replace `iap-vps` and `us-central1-a` with your chosen instance name and zone if
 
 ---
 
-## Step 5 — Configure OpenClaw
+## Step 6 — Verify OpenClaw
 
 OpenClaw is installed automatically on first boot (takes 2-3 minutes). Check the service status:
 
@@ -91,21 +105,21 @@ OpenClaw is installed automatically on first boot (takes 2-3 minutes). Check the
 sudo systemctl status openclaw-gateway
 ```
 
-Watch the installation logs:
+Watch the logs:
 
 ```bash
 sudo journalctl -u openclaw-gateway -f
 ```
 
-Configure your API keys and messaging platforms:
+To pick up new secrets after updating them in Secret Manager:
 
 ```bash
-sudo -u openclaw openclaw config
+sudo systemctl restart openclaw-gateway
 ```
 
 ---
 
-## Step 6 — Verify access control
+## Step 7 — Verify access control
 
 Confirm the instance has no external IP:
 
@@ -135,10 +149,14 @@ gcloud compute firewall-rules delete allow-iap-ssh-deny-public --quiet
 gcloud compute routers nats delete iap-vps-nat \
   --router=iap-vps-router --region=us-central1 --quiet
 gcloud compute routers delete iap-vps-router --region=us-central1 --quiet
+
+# Delete Secret Manager secret and VM service account
+gcloud secrets delete openclaw-env --quiet
+gcloud iam service-accounts delete iap-vps-vm-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com --quiet
 ```
 
 ---
 
 <walkthrough-conclusion-trophy></walkthrough-conclusion-trophy>
 
-**Deployment complete!** Your VPS is running OpenClaw with IAP-only access — no exposed ports, no public IP. Connect via `gcloud compute ssh --tunnel-through-iap` and run `sudo -u openclaw openclaw config` to set up your API keys and messaging channels.
+**Deployment complete!** Your VPS is running OpenClaw with IAP-only access — no exposed ports, no public IP, secrets in RAM only. Add your API keys to Secret Manager and restart the service to get started.

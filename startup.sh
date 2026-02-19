@@ -8,8 +8,145 @@ OPENCLAW_HOME="/home/${OPENCLAW_USER}"
 SENTINEL_FILE="/var/lib/openclaw/.provisioned"
 LOG_TAG="openclaw-startup"
 NODE_MAJOR=22
+SECRETS_ENV="/run/openclaw/env"
+METADATA_URL="http://metadata.google.internal/computeMetadata/v1"
+METADATA_HEADER="Metadata-Flavor: Google"
 
 log() { logger -t "${LOG_TAG}" "$*"; echo "[${LOG_TAG}] $*"; }
+
+# ─── Fetch secrets from Secret Manager (runs every boot) ────────────────────
+fetch_secrets() {
+  log "Fetching secrets from Secret Manager…"
+
+  mkdir -p /run/openclaw
+  chmod 700 /run/openclaw
+
+  # Get project ID from metadata server
+  local project_id
+  project_id="$(curl -sf -H "${METADATA_HEADER}" \
+    "${METADATA_URL}/project/project-id" 2>/dev/null)" || {
+    log "Could not reach metadata server — skipping secret fetch."
+    return 1
+  }
+
+  # Get access token from metadata server (requires VM service account)
+  local token
+  token="$(curl -sf -H "${METADATA_HEADER}" \
+    "${METADATA_URL}/instance/service-accounts/default/token" 2>/dev/null \
+    | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')" || {
+    log "No VM service account — skipping secret fetch."
+    return 1
+  }
+
+  if [[ -z "${token}" ]]; then
+    log "Empty access token — skipping secret fetch."
+    return 1
+  fi
+
+  # Fetch the openclaw-env secret from Secret Manager REST API
+  local secret_url="https://secretmanager.googleapis.com/v1/projects/${project_id}/secrets/openclaw-env/versions/latest:access"
+  local response
+  response="$(curl -sf \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" \
+    "${secret_url}" 2>/dev/null)" || {
+    log "Could not fetch openclaw-env secret (may not exist yet)."
+    return 1
+  }
+
+  # Extract the base64-encoded payload and decode it
+  local payload
+  payload="$(echo "${response}" | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')"
+
+  if [[ -z "${payload}" ]]; then
+    log "Secret openclaw-env has empty payload — skipping."
+    return 1
+  fi
+
+  echo "${payload}" | base64 -d > "${SECRETS_ENV}"
+  chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${SECRETS_ENV}"
+  chmod 600 "${SECRETS_ENV}"
+
+  local key_count
+  key_count="$(grep -c '=' "${SECRETS_ENV}" 2>/dev/null || echo 0)"
+  log "Loaded ${key_count} environment variable(s) from Secret Manager."
+  return 0
+}
+
+# ─── Protect credential paths (tmpfs overlay) ───────────────────────────────
+protect_credential_paths() {
+  local cred_tmpfs="/run/openclaw/credentials"
+  mkdir -p "${cred_tmpfs}"
+  chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${cred_tmpfs}"
+  chmod 700 "${cred_tmpfs}"
+
+  # Ensure the openclaw state dir exists
+  local state_dir="${OPENCLAW_HOME}/.openclaw"
+  mkdir -p "${state_dir}"
+  chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${state_dir}"
+
+  # Bind-mount tmpfs over credential paths so any file writes stay in RAM
+  local cred_dir="${state_dir}/credentials"
+  mkdir -p "${cred_dir}"
+  if ! mountpoint -q "${cred_dir}" 2>/dev/null; then
+    mount --bind "${cred_tmpfs}" "${cred_dir}"
+    log "Mounted tmpfs over ${cred_dir}"
+  fi
+
+  # Prevent .env files from being written to persistent disk
+  local dot_env="${state_dir}/.env"
+  if [[ ! -L "${dot_env}" ]]; then
+    rm -f "${dot_env}"
+    ln -sf /dev/null "${dot_env}"
+    log "Symlinked ${dot_env} → /dev/null"
+  fi
+
+  chown -R "${OPENCLAW_USER}:${OPENCLAW_USER}" "${state_dir}"
+}
+
+# ─── Install the secret-fetch script (for systemd ExecStartPre) ─────────────
+install_fetch_script() {
+  cat > /usr/local/bin/fetch-openclaw-secrets <<'FETCHSCRIPT'
+#!/bin/bash
+# Fetches openclaw-env from GCP Secret Manager and writes to /run/openclaw/env.
+# Called by systemd ExecStartPre before each gateway start.
+set -euo pipefail
+
+SECRETS_ENV="/run/openclaw/env"
+METADATA_URL="http://metadata.google.internal/computeMetadata/v1"
+METADATA_HEADER="Metadata-Flavor: Google"
+
+mkdir -p /run/openclaw
+chmod 700 /run/openclaw
+
+PROJECT_ID="$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/project/project-id" 2>/dev/null)" || exit 0
+TOKEN="$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/service-accounts/default/token" 2>/dev/null \
+  | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')" || exit 0
+[[ -z "${TOKEN}" ]] && exit 0
+
+RESPONSE="$(curl -sf \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  "https://secretmanager.googleapis.com/v1/projects/${PROJECT_ID}/secrets/openclaw-env/versions/latest:access" 2>/dev/null)" || exit 0
+
+PAYLOAD="$(echo "${RESPONSE}" | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')"
+[[ -z "${PAYLOAD}" ]] && exit 0
+
+echo "${PAYLOAD}" | base64 -d > "${SECRETS_ENV}"
+chown openclaw:openclaw "${SECRETS_ENV}"
+chmod 600 "${SECRETS_ENV}"
+FETCHSCRIPT
+  chmod 755 /usr/local/bin/fetch-openclaw-secrets
+}
+
+# ─── Try to fetch secrets on every boot ──────────────────────────────────────
+# Ensure the user exists first (needed for chown in fetch_secrets)
+if ! id "${OPENCLAW_USER}" &>/dev/null; then
+  useradd --system --create-home --shell /bin/bash "${OPENCLAW_USER}"
+fi
+
+fetch_secrets || true
+protect_credential_paths
 
 # ─── Already provisioned? Just ensure the service is running ─────────────────
 if [ -f "${SENTINEL_FILE}" ]; then
@@ -20,13 +157,7 @@ fi
 
 log "Starting OpenClaw provisioning…"
 
-# ─── 1. Create dedicated user ───────────────────────────────────────────────
-if ! id "${OPENCLAW_USER}" &>/dev/null; then
-  log "Creating user ${OPENCLAW_USER}…"
-  useradd --system --create-home --shell /bin/bash "${OPENCLAW_USER}"
-fi
-
-# ─── 2. Install Node.js 22 from NodeSource ──────────────────────────────────
+# ─── 1. Install Node.js 22 from NodeSource ──────────────────────────────────
 if ! command -v node &>/dev/null || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt "${NODE_MAJOR}" ]; then
   log "Installing Node.js ${NODE_MAJOR}…"
   apt-get update -qq
@@ -41,7 +172,7 @@ if ! command -v node &>/dev/null || [ "$(node --version | cut -d. -f1 | tr -d v)
 fi
 log "Node.js version: $(node --version)"
 
-# ─── 3. Install OpenClaw globally ───────────────────────────────────────────
+# ─── 2. Install OpenClaw globally ───────────────────────────────────────────
 if ! command -v openclaw &>/dev/null; then
   log "Installing openclaw…"
   npm install -g openclaw@latest
@@ -49,6 +180,10 @@ fi
 
 OPENCLAW_BIN="$(which openclaw)"
 log "openclaw binary: ${OPENCLAW_BIN}"
+
+# ─── 3. Install the fetch-secrets helper ─────────────────────────────────────
+install_fetch_script
+log "Installed /usr/local/bin/fetch-openclaw-secrets"
 
 # ─── 4. Create systemd service ──────────────────────────────────────────────
 log "Creating systemd service…"
@@ -63,10 +198,20 @@ Type=simple
 User=${OPENCLAW_USER}
 Group=${OPENCLAW_USER}
 WorkingDirectory=${OPENCLAW_HOME}
+
+# Fetch fresh secrets from Secret Manager before each start
+ExecStartPre=+/usr/local/bin/fetch-openclaw-secrets
+
+# Load secrets from tmpfs (- prefix: don't fail if file is missing)
+EnvironmentFile=-${SECRETS_ENV}
+
 ExecStart=${OPENCLAW_BIN} gateway --port 18789 --verbose
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production
+
+# Prevent OpenClaw from writing secrets to persistent disk
+Environment=OPENCLAW_STATE_DIR=${OPENCLAW_HOME}/.openclaw
 
 [Install]
 WantedBy=multi-user.target

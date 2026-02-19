@@ -2,6 +2,8 @@
 
 Deploy a secure virtual machine on Google Cloud with [OpenClaw](https://openclaw.ai/) pre-installed. The VM is **only accessible through [Identity-Aware Proxy (IAP)](https://cloud.google.com/iap)** — no public IP address, no SSH port open to the internet. Access is gated entirely by your Google identity.
 
+Secrets (API keys, bot tokens) are stored in **GCP Secret Manager** and injected into the OpenClaw process at startup — never written to persistent disk.
+
 ---
 
 ## Deploy to GCP
@@ -18,6 +20,8 @@ Click the button below to open this repo in Cloud Shell and follow the interacti
 |----------|---------|
 | **VM instance** | `e2-medium` (2 vCPU, 4 GB), Debian 12, Shielded VM, **no external IP**, 20 GB SSD |
 | **OpenClaw** | Installed via startup script; runs as `openclaw-gateway` systemd service on port 18789 |
+| **Secret Manager** | `openclaw-env` secret for API keys; fetched at each service start, stored only in RAM |
+| **VM service account** | `iap-vps-vm-sa` with `secretmanager.secretAccessor` only |
 | **Cloud NAT** | Outbound-only internet for the private VM (package downloads, API calls) |
 | **Cloud Router** | Required by Cloud NAT |
 | **Firewall (allow)** | SSH (`tcp:22`) from IAP range `35.235.240.0/20` only |
@@ -25,7 +29,7 @@ Click the button below to open this repo in Cloud Shell and follow the interacti
 | **OS Login** | Enabled — SSH keys managed via IAM |
 | **IAM binding** | Deploying user receives `roles/iap.tunnelResourceAccessor` |
 
-APIs enabled automatically: `compute.googleapis.com`, `iap.googleapis.com`
+APIs enabled automatically: `compute.googleapis.com`, `iap.googleapis.com`, `secretmanager.googleapis.com`, `iam.googleapis.com`
 
 ---
 
@@ -79,6 +83,40 @@ gcloud authenticates your Google identity through IAP before forwarding the conn
 
 ---
 
+## Secrets management
+
+API keys and bot tokens are stored in GCP Secret Manager as a single secret called `openclaw-env` in `KEY=VALUE` format. On each service start, the `fetch-openclaw-secrets` helper pulls the latest version from Secret Manager and writes it to `/run/openclaw/env` (tmpfs — RAM-backed, never on persistent disk). The systemd unit loads this file via `EnvironmentFile`.
+
+**Add or update secrets:**
+
+```bash
+gcloud secrets versions add openclaw-env \
+  --project=YOUR_PROJECT_ID --data-file=- <<'EOF'
+ANTHROPIC_API_KEY=sk-ant-...
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_SIGNING_SECRET=...
+OPENCLAW_GATEWAY_TOKEN=...
+EOF
+```
+
+**Pick up new secrets** (no reboot needed):
+
+```bash
+gcloud compute ssh iap-vps --tunnel-through-iap \
+  -- sudo systemctl restart openclaw-gateway
+```
+
+**What's protected:**
+
+| Path | Protection |
+|------|-----------|
+| `/run/openclaw/env` | tmpfs (RAM) — secrets never touch persistent disk |
+| `~/.openclaw/credentials/` | Bind-mounted to tmpfs — any writes stay in RAM |
+| `~/.openclaw/.env` | Symlinked to `/dev/null` — writes discarded |
+
+---
+
 ## Configure OpenClaw
 
 OpenClaw is installed automatically on first boot (takes 2-3 minutes). After SSH-ing in:
@@ -89,9 +127,6 @@ sudo systemctl status openclaw-gateway
 
 # Watch logs
 sudo journalctl -u openclaw-gateway -f
-
-# Configure API keys and messaging platforms
-sudo -u openclaw openclaw config
 ```
 
 The gateway listens on `127.0.0.1:18789`. Since the VM has no public IP, the gateway is only reachable through the IAP tunnel.
@@ -114,6 +149,7 @@ Google Identity-Aware Proxy
 VM instance (no external IP)
     │  port 22 open only to 35.235.240.0/20
     │  OpenClaw gateway on 127.0.0.1:18789
+    │  Secrets from Secret Manager → tmpfs (RAM only)
     └─ Firewall denies all direct internet SSH
        Cloud NAT provides outbound-only internet
 ```
@@ -134,6 +170,10 @@ gcloud compute firewall-rules delete allow-iap-ssh-deny-public --quiet
 gcloud compute routers nats delete iap-vps-nat \
   --router=iap-vps-router --region=us-central1 --quiet
 gcloud compute routers delete iap-vps-router --region=us-central1 --quiet
+
+# Delete Secret Manager secret and VM service account
+gcloud secrets delete openclaw-env --quiet
+gcloud iam service-accounts delete iap-vps-vm-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com --quiet
 ```
 
 ---
