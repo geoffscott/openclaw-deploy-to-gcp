@@ -83,6 +83,34 @@ gcloud authenticates your Google identity through IAP before forwarding the conn
 
 ---
 
+## Accessing the OpenClaw Web UI
+
+The OpenClaw gateway runs on `localhost:18789` inside the VM. To access the web UI from your browser, forward the port through the IAP SSH tunnel:
+
+```bash
+gcloud compute ssh iap-vps \
+  --zone=us-central1-a \
+  --tunnel-through-iap \
+  -- -L 18789:localhost:18789
+```
+
+Then open [http://localhost:18789](http://localhost:18789) in your browser. The tunnel stays open as long as the SSH session is active.
+
+**How this works:** The `-L 18789:localhost:18789` flag tells SSH to listen on port 18789 on your machine and forward traffic through the IAP tunnel to port 18789 on the VM. Your browser talks to `localhost`, SSH encrypts and routes it through IAP (which verifies your Google identity), and it arrives at the OpenClaw gateway. No port is opened on the VM — the same zero-public-surface architecture applies.
+
+**Tip:** If port 18789 is already in use on your machine, pick a different local port:
+
+```bash
+gcloud compute ssh iap-vps \
+  --zone=us-central1-a \
+  --tunnel-through-iap \
+  -- -L 8080:localhost:18789
+```
+
+Then open [http://localhost:8080](http://localhost:8080) instead.
+
+---
+
 ## Secrets management
 
 API keys and bot tokens are stored in GCP Secret Manager as a single secret called `openclaw-env` in `KEY=VALUE` format. On each service start, the `fetch-openclaw-secrets` helper pulls the latest version from Secret Manager and writes it to `/run/openclaw/env` (tmpfs — RAM-backed, never on persistent disk). The systemd unit loads this file via `EnvironmentFile`.
@@ -138,7 +166,12 @@ The gateway listens on `127.0.0.1:18789`. Since the VM has no public IP, the gat
 ```
 Your machine
     │
-    │  gcloud compute ssh --tunnel-through-iap
+    │  gcloud compute ssh --tunnel-through-iap -- -L 18789:localhost:18789
+    │
+    ├─ SSH terminal session
+    │
+    ├─ Browser → http://localhost:18789
+    │       (port-forwarded through the same IAP tunnel)
     │
     ▼
 Google Identity-Aware Proxy
