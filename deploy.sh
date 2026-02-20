@@ -45,6 +45,105 @@ REGION="${ZONE%-*}"   # strip zone suffix, e.g. us-central1-a → us-central1
 VM_SA_NAME="${INSTANCE_NAME}-vm-sa"
 VM_SA_EMAIL="${VM_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
+# ─── Pre-flight: verify deployer permissions ─────────────────────────────────
+check_deployer_permissions() {
+  local deployer_email
+  deployer_email="$(gcloud config get-value account 2>/dev/null)"
+
+  echo "▶ Checking deployer permissions…"
+  echo "  Account: ${deployer_email}"
+
+  # Probe each required permission with a lightweight read-only gcloud command.
+  # Uses --quiet to prevent interactive prompts and timeout to prevent hangs.
+  local missing_roles=()
+
+  # roles/compute.admin — can list instances
+  if ! timeout 15 gcloud compute instances list \
+       --project="${PROJECT_ID}" --limit=1 --quiet &>/dev/null; then
+    missing_roles+=("roles/compute.admin")
+  fi
+
+  # roles/iam.serviceAccountAdmin — can list service accounts
+  if ! timeout 15 gcloud iam service-accounts list \
+       --project="${PROJECT_ID}" --limit=1 --quiet &>/dev/null; then
+    missing_roles+=("roles/iam.serviceAccountAdmin")
+  fi
+
+  # roles/secretmanager.admin — can list secrets
+  if ! timeout 15 gcloud secrets list \
+       --project="${PROJECT_ID}" --limit=1 --quiet &>/dev/null; then
+    missing_roles+=("roles/secretmanager.admin")
+  fi
+
+  # roles/iam.securityAdmin — can list IAM roles
+  if ! timeout 15 gcloud iam roles list \
+       --project="${PROJECT_ID}" --limit=1 --quiet &>/dev/null; then
+    missing_roles+=("roles/iam.securityAdmin")
+  fi
+
+  # roles/serviceusage.serviceUsageAdmin — can list services
+  if ! timeout 15 gcloud services list \
+       --project="${PROJECT_ID}" --limit=1 --quiet &>/dev/null; then
+    missing_roles+=("roles/serviceusage.serviceUsageAdmin")
+  fi
+
+  if [[ ${#missing_roles[@]} -eq 0 ]]; then
+    echo "  ✓ All required permissions verified"
+    return 0
+  fi
+
+  echo ""
+  echo "  ✗ Missing ${#missing_roles[@]} required role(s):"
+  for role in "${missing_roles[@]}"; do
+    echo "      • ${role}"
+  done
+  echo ""
+  echo "  A project Owner must grant these roles to the deployer service account."
+  echo "  Run the following commands as Owner:"
+  echo ""
+
+  # If the deployer SA name doesn't match the docs, include rename instructions
+  if [[ "${deployer_email}" != "openclaw-deployer@${PROJECT_ID}.iam.gserviceaccount.com" ]]; then
+    echo "  ── Option A: Create the correct deployer SA (recommended) ──"
+    echo ""
+    echo "    # 1. Create the openclaw-deployer service account"
+    echo "    gcloud iam service-accounts create openclaw-deployer \\"
+    echo "      --display-name='OpenClaw Deployer' \\"
+    echo "      --project=${PROJECT_ID}"
+    echo ""
+    echo "    # 2. Grant all required roles"
+    echo "    for ROLE in roles/compute.admin roles/iam.securityAdmin \\"
+    echo "               roles/serviceusage.serviceUsageAdmin \\"
+    echo "               roles/iam.serviceAccountAdmin roles/secretmanager.admin; do"
+    echo "      gcloud projects add-iam-policy-binding ${PROJECT_ID} \\"
+    echo "        --member='serviceAccount:openclaw-deployer@${PROJECT_ID}.iam.gserviceaccount.com' \\"
+    echo "        --role=\"\${ROLE}\""
+    echo "    done"
+    echo ""
+    echo "    # 3. Create and download a key"
+    echo "    gcloud iam service-accounts keys create key.json \\"
+    echo "      --iam-account='openclaw-deployer@${PROJECT_ID}.iam.gserviceaccount.com'"
+    echo "    base64 -w 0 key.json   # copy output → GCP_SERVICE_ACCOUNT_KEY secret"
+    echo "    rm key.json"
+    echo ""
+    echo "    # 4. (Optional) Delete the old service account"
+    echo "    gcloud iam service-accounts delete '${deployer_email}' \\"
+    echo "      --project=${PROJECT_ID} --quiet"
+    echo ""
+    echo "  ── Option B: Grant roles to the existing SA ────────────────"
+    echo ""
+  fi
+
+  for role in "${missing_roles[@]}"; do
+    echo "    gcloud projects add-iam-policy-binding ${PROJECT_ID} \\"
+    echo "      --member='serviceAccount:${deployer_email}' \\"
+    echo "      --role='${role}'"
+  done
+  echo ""
+  echo "  Then re-run this script."
+  exit 1
+}
+
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "  GCP IAP-Only VPS + OpenClaw Deployment"
@@ -57,6 +156,8 @@ echo "  Type     : ${MACHINE_TYPE}"
 echo "  Disk     : ${BOOT_DISK_SIZE} ${BOOT_DISK_TYPE}"
 echo "════════════════════════════════════════════════════════════"
 echo ""
+
+check_deployer_permissions
 
 # ─── Enable required APIs ────────────────────────────────────────────────────
 echo "▶ Enabling required APIs…"
@@ -101,29 +202,41 @@ if gcloud services list --project="${PROJECT_ID}" --filter="name:secretmanager.g
    --format="value(name)" 2>/dev/null | grep -q "secretmanager"; then
 
   # Create VM service account (for Secret Manager access)
+  SA_ERR=""
   if gcloud iam service-accounts describe "${VM_SA_EMAIL}" \
-       --project="${PROJECT_ID}" &>/dev/null 2>&1; then
+       --project="${PROJECT_ID}" &>/dev/null; then
     echo "  Service account ${VM_SA_NAME} already exists."
   else
-    if gcloud iam service-accounts create "${VM_SA_NAME}" \
+    SA_ERR="$(gcloud iam service-accounts create "${VM_SA_NAME}" \
          --display-name="OpenClaw VM (${INSTANCE_NAME})" \
-         --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+         --project="${PROJECT_ID}" --quiet 2>&1)" && {
       echo "  ✓ Created service account ${VM_SA_NAME}"
-    else
-      echo "  ⚠  Could not create service account (deployer may lack iam.serviceAccountAdmin role)."
-    fi
+    } || {
+      echo "  ✗ Could not create service account ${VM_SA_NAME}:"
+      echo "    ${SA_ERR}" | head -3
+      echo ""
+      echo "    The deployer needs roles/iam.serviceAccountAdmin. A project Owner should run:"
+      echo "      gcloud projects add-iam-policy-binding ${PROJECT_ID} \\"
+      echo "        --member='serviceAccount:$(gcloud config get-value account 2>/dev/null)' \\"
+      echo "        --role='roles/iam.serviceAccountAdmin'"
+    }
   fi
 
   # Grant secretmanager.secretAccessor (read values) and secretmanager.viewer
   # (list secrets) to the VM service account
   if gcloud iam service-accounts describe "${VM_SA_EMAIL}" \
-       --project="${PROJECT_ID}" &>/dev/null 2>&1; then
+       --project="${PROJECT_ID}" &>/dev/null; then
+    BIND_ERR=""
     for SM_ROLE in roles/secretmanager.secretAccessor roles/secretmanager.viewer; do
-      gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+      BIND_ERR="$(gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
         --member="serviceAccount:${VM_SA_EMAIL}" \
         --role="${SM_ROLE}" \
         --condition=None \
-        --quiet 2>/dev/null || true
+        --quiet 2>&1)" || {
+        echo "  ✗ Could not grant ${SM_ROLE} to ${VM_SA_EMAIL}:"
+        echo "    ${BIND_ERR}" | head -2
+        echo "    The deployer needs roles/iam.securityAdmin to manage IAM bindings."
+      }
     done
 
     # The deployer needs iam.serviceAccountUser on the VM SA to attach it
@@ -314,16 +427,25 @@ echo "  ✓ Instance ready"
 
 # ─── Grant current user IAP-tunnelled SSH access ─────────────────────────────
 echo ""
-echo "▶ Granting IAP-tunnel access to the current user…"
+echo "▶ Granting IAP-tunnel access…"
 CURRENT_USER_EMAIL="$(gcloud config get-value account 2>/dev/null)"
 
 if [[ -n "${CURRENT_USER_EMAIL}" ]]; then
-  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-    --member="user:${CURRENT_USER_EMAIL}" \
-    --role="roles/iap.tunnelResourceAccessor" \
-    --condition=None \
-    --quiet 2>/dev/null || true
-  echo "  ✓ IAP access granted to ${CURRENT_USER_EMAIL}"
+  if [[ "${CURRENT_USER_EMAIL}" == *"iam.gserviceaccount.com" ]]; then
+    echo "  Deployer is a service account — skipping IAP self-grant."
+    echo "  To grant IAP access to a human user, run:"
+    echo ""
+    echo "    gcloud projects add-iam-policy-binding ${PROJECT_ID} \\"
+    echo "      --member='user:YOU@example.com' \\"
+    echo "      --role='roles/iap.tunnelResourceAccessor'"
+  else
+    gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+      --member="user:${CURRENT_USER_EMAIL}" \
+      --role="roles/iap.tunnelResourceAccessor" \
+      --condition=None \
+      --quiet 2>/dev/null || true
+    echo "  ✓ IAP access granted to ${CURRENT_USER_EMAIL}"
+  fi
 else
   echo "  ⚠  Could not detect current user — grant IAP access manually:"
   echo "     gcloud projects add-iam-policy-binding ${PROJECT_ID} \\"
@@ -331,10 +453,58 @@ else
   echo "       --role='roles/iap.tunnelResourceAccessor'"
 fi
 
+# ─── Post-deploy health check ─────────────────────────────────────────────────
+echo ""
+echo "▶ Deployment health check…"
+
+HEALTH_ISSUES=0
+
+# Check VM status
+VM_STATUS="$(gcloud compute instances describe "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --format="value(status)" 2>/dev/null)" || VM_STATUS="NOT_FOUND"
+if [[ "${VM_STATUS}" == "RUNNING" ]]; then
+  echo "  ✓ VM status: RUNNING"
+else
+  echo "  ✗ VM status: ${VM_STATUS}"
+  HEALTH_ISSUES=$((HEALTH_ISSUES + 1))
+fi
+
+# Check VM service account
+VM_SA="$(gcloud compute instances describe "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --format="value(serviceAccounts[0].email)" 2>/dev/null)" || VM_SA=""
+if [[ -n "${VM_SA}" && "${VM_SA}" != "None" ]]; then
+  echo "  ✓ VM service account: ${VM_SA}"
+else
+  echo "  ✗ VM has no service account — cannot access Secret Manager"
+  echo "    Re-run this script after granting the deployer the required roles."
+  HEALTH_ISSUES=$((HEALTH_ISSUES + 1))
+fi
+
+# Check for secrets in Secret Manager
+SECRET_COUNT="$(gcloud secrets list --project="${PROJECT_ID}" \
+  --format="value(name)" 2>/dev/null | wc -l)" || SECRET_COUNT=0
+if [[ "${SECRET_COUNT}" -gt 0 ]]; then
+  echo "  ✓ Secret Manager: ${SECRET_COUNT} secret(s) found"
+else
+  echo "  ⚠ No secrets in Secret Manager yet"
+  echo "    Create secrets with: gcloud secrets create SECRET_NAME --project=${PROJECT_ID} --data-file=- <<< 'value'"
+fi
+
+if [[ "${HEALTH_ISSUES}" -gt 0 ]]; then
+  echo ""
+  echo "  ⚠ ${HEALTH_ISSUES} issue(s) detected — see messages above."
+fi
+
 # ─── Done ─────────────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════════════════════"
-echo "  Deployment complete!"
+if [[ "${HEALTH_ISSUES}" -eq 0 ]]; then
+  echo "  Deployment complete!"
+else
+  echo "  Deployment complete (with ${HEALTH_ISSUES} warning(s))"
+fi
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "  Connect to your VPS via IAP:"
