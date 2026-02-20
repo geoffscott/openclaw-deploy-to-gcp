@@ -1,6 +1,8 @@
-# Service account keys (the most common accidental commit)
-*.json
-!.claude/settings.json
+# Service account keys
+key.json
+*-key.json
+*_key.json
+credentials.json
 
 # Environment / secret files
 .env
