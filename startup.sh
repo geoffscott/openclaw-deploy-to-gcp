@@ -116,24 +116,27 @@ fetch_secrets() {
   return 0
 }
 
-# ─── Protect credential paths (tmpfs overlay) ───────────────────────────────
+# ─── Protect credential paths ─────────────────────────────────────────────
+# Secrets are already protected:
+#   • /run/openclaw/env  — tmpfs (RAM only), loaded from Secret Manager
+#   • ~/.openclaw/.env   — symlinked to /dev/null
+# The credentials directory is NOT mounted on tmpfs because OpenClaw stores
+# device tokens there; wiping them on reboot breaks Web UI reconnection.
 protect_credential_paths() {
-  local cred_tmpfs="/run/openclaw/credentials"
-  mkdir -p "${cred_tmpfs}"
-  chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${cred_tmpfs}"
-  chmod 700 "${cred_tmpfs}"
-
   # Ensure the openclaw state dir exists
   local state_dir="${OPENCLAW_HOME}/.openclaw"
   mkdir -p "${state_dir}"
   chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${state_dir}"
 
-  # Bind-mount tmpfs over credential paths so any file writes stay in RAM
+  # Ensure credentials dir exists with restricted permissions
   local cred_dir="${state_dir}/credentials"
   mkdir -p "${cred_dir}"
-  if ! mountpoint -q "${cred_dir}" 2>/dev/null; then
-    mount --bind "${cred_tmpfs}" "${cred_dir}"
-    log "Mounted tmpfs over ${cred_dir}"
+  chmod 700 "${cred_dir}"
+
+  # Unmount stale tmpfs bind-mount from previous versions if present
+  if mountpoint -q "${cred_dir}" 2>/dev/null; then
+    umount "${cred_dir}" 2>/dev/null || true
+    log "Removed tmpfs bind-mount from ${cred_dir} (device tokens now persist)"
   fi
 
   # Prevent .env files from being written to persistent disk
