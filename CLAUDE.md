@@ -49,6 +49,7 @@ gcloud services enable \
   iap.googleapis.com \
   secretmanager.googleapis.com \
   iam.googleapis.com \
+  cloudresourcemanager.googleapis.com \
   --project=YOUR_PROJECT_ID
 ```
 

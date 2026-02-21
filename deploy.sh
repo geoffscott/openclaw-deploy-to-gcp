@@ -162,7 +162,7 @@ check_deployer_permissions
 # ─── Enable required APIs ────────────────────────────────────────────────────
 echo "▶ Enabling required APIs…"
 
-REQUIRED_APIS="compute.googleapis.com iap.googleapis.com secretmanager.googleapis.com iam.googleapis.com"
+REQUIRED_APIS="compute.googleapis.com iap.googleapis.com secretmanager.googleapis.com iam.googleapis.com cloudresourcemanager.googleapis.com"
 
 if gcloud services enable ${REQUIRED_APIS} \
   --project="${PROJECT_ID}" \
