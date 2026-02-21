@@ -225,20 +225,37 @@ if [ -f "${SENTINEL_FILE}" ]; then
   # Always update the fetch-secrets helper so fixes propagate on reboot
   install_fetch_script
 
-  # Self-repair: ensure the service unit has --allow-unconfigured
+  # Self-repair: ensure the service unit has the correct ExecStart with --token
   UNIT_FILE="/etc/systemd/system/openclaw-gateway.service"
-  if [ -f "${UNIT_FILE}" ] && ! grep -q -- '--allow-unconfigured' "${UNIT_FILE}"; then
-    log "Updating service unit: adding --allow-unconfigured flag."
-    sed -i 's|gateway --port 18789 --verbose|gateway --port 18789 --verbose --allow-unconfigured|' "${UNIT_FILE}"
+  NEEDS_RELOAD=false
+
+  if [ -f "${UNIT_FILE}" ]; then
+    # Add --allow-unconfigured if missing
+    if ! grep -q -- '--allow-unconfigured' "${UNIT_FILE}"; then
+      log "Updating service unit: adding --allow-unconfigured flag."
+      sed -i 's|gateway --port 18789 --verbose|gateway --port 18789 --verbose --allow-unconfigured|' "${UNIT_FILE}"
+      NEEDS_RELOAD=true
+    fi
+
+    # Add --token via shell wrapper if missing (critical for Web UI auth)
+    if ! grep -q -- '--token' "${UNIT_FILE}"; then
+      log "Updating service unit: adding --token flag for gateway auth."
+      OPENCLAW_BIN="$(which openclaw 2>/dev/null || echo /usr/bin/openclaw)"
+      sed -i "s|^ExecStart=.*|ExecStart=/bin/sh -c 'exec ${OPENCLAW_BIN} gateway --port 18789 --verbose --allow-unconfigured \${OPENCLAW_GATEWAY_TOKEN:+--token \"\${OPENCLAW_GATEWAY_TOKEN}\"}'|" "${UNIT_FILE}"
+      NEEDS_RELOAD=true
+    fi
+
     if ! grep -q 'StartLimitBurst' "${UNIT_FILE}"; then
       sed -i '/^Wants=network-online.target$/a StartLimitIntervalSec=300\nStartLimitBurst=5' "${UNIT_FILE}"
+      NEEDS_RELOAD=true
     fi
-    systemctl daemon-reload
-    systemctl restart openclaw-gateway.service 2>/dev/null || true
-  else
-    # Restart (not just start) so ExecStartPre re-fetches secrets with the updated helper
-    systemctl restart openclaw-gateway.service 2>/dev/null || true
   fi
+
+  if [ "${NEEDS_RELOAD}" = true ]; then
+    systemctl daemon-reload
+  fi
+  # Always restart so ExecStartPre re-fetches secrets with the updated helper
+  systemctl restart openclaw-gateway.service 2>/dev/null || true
 
   exit 0
 fi
@@ -295,7 +312,7 @@ ExecStartPre=+/usr/local/bin/fetch-openclaw-secrets
 # Load secrets from tmpfs (- prefix: don't fail if file is missing)
 EnvironmentFile=-${SECRETS_ENV}
 
-ExecStart=${OPENCLAW_BIN} gateway --port 18789 --verbose --allow-unconfigured
+ExecStart=/bin/sh -c 'exec ${OPENCLAW_BIN} gateway --port 18789 --verbose --allow-unconfigured \${OPENCLAW_GATEWAY_TOKEN:+--token "\${OPENCLAW_GATEWAY_TOKEN}"}'
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production
