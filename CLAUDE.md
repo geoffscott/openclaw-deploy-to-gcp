@@ -49,6 +49,7 @@ gcloud services enable \
   iap.googleapis.com \
   secretmanager.googleapis.com \
   iam.googleapis.com \
+  cloudresourcemanager.googleapis.com \
   --project=YOUR_PROJECT_ID
 ```
 
@@ -69,16 +70,40 @@ enumerates all secrets at startup and writes them to `/run/openclaw/env`
 (tmpfs — RAM only, never on disk). This project should be dedicated to
 this deployment.
 
-```bash
-# Add a new secret
-gcloud secrets create ANTHROPIC_API_KEY \
-  --project="${GCP_PROJECT_ID}" \
-  --data-file=- <<< 'sk-ant-...'
+`deploy.sh` automatically creates all secrets with placeholder values.
+You only need to fill in the ones you want to use.
 
-# Update an existing secret
+### Pre-created secrets
+
+| Secret | Category | Default |
+|--------|----------|---------|
+| `ANTHROPIC_API_KEY` | **Required** | `REPLACE_ME` |
+| `OPENAI_API_KEY` | Provider | `DISABLED` |
+| `OPENROUTER_API_KEY` | Provider | `DISABLED` |
+| `GEMINI_API_KEY` | Provider | `DISABLED` |
+| `XAI_API_KEY` | Provider | `DISABLED` |
+| `GROQ_API_KEY` | Provider | `DISABLED` |
+| `MISTRAL_API_KEY` | Provider | `DISABLED` |
+| `DEEPGRAM_API_KEY` | Provider | `DISABLED` |
+| `TELEGRAM_BOT_TOKEN` | Channel | `DISABLED` |
+| `DISCORD_BOT_TOKEN` | Channel | `DISABLED` |
+| `SLACK_BOT_TOKEN` | Channel | `DISABLED` |
+| `SLACK_APP_TOKEN` | Channel | `DISABLED` |
+| `OPENCLAW_GATEWAY_TOKEN` | Gateway | Auto-generated (hex) |
+| `OPENCLAW_PRIMARY_MODEL` | Gateway | `claude-sonnet-4-20250514` |
+
+Secrets left as `DISABLED` are ignored by OpenClaw.
+
+```bash
+# Update a required secret
 gcloud secrets versions add ANTHROPIC_API_KEY \
   --project="${GCP_PROJECT_ID}" \
-  --data-file=- <<< 'sk-ant-new-key...'
+  --data-file=- <<< 'sk-ant-api03-...'
+
+# Enable a channel
+gcloud secrets versions add TELEGRAM_BOT_TOKEN \
+  --project="${GCP_PROJECT_ID}" \
+  --data-file=- <<< '123456:ABC-...'
 
 # Restart service to pick up new secrets
 gcloud compute ssh iap-vps --zone=us-central1-a \

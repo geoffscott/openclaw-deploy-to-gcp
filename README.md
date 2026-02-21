@@ -12,6 +12,13 @@ Click the button below to open this repo in Cloud Shell and follow the interacti
 
 [![Deploy to GCP](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/geoffscott/openclaw-deploy-to-gcp&cloudshell_tutorial=cloudshell_tutorial.md)
 
+The tutorial will walk you through:
+
+1. **Select your project** — pick (or create) a dedicated GCP project
+2. **Run the deploy script** — creates the VM, firewall, NAT, and secrets
+3. **Add your API key** — update the `ANTHROPIC_API_KEY` secret with your real key
+4. **Access the Web UI** — port-forward through the IAP tunnel and open it in your browser
+
 ---
 
 ## What gets deployed
@@ -119,24 +126,23 @@ Each secret in the GCP project becomes an environment variable for OpenClaw. Cre
 
 ### Required secrets
 
+The deploy script pre-creates all secrets with placeholder values. You just need to update the ones you want to use.
+
 | Secret | Value | How to obtain |
 |--------|-------|---------------|
 | `ANTHROPIC_API_KEY` | Anthropic API key (`sk-ant-...`) | [Anthropic Console](https://console.anthropic.com/) → API Keys |
-| `OPENCLAW_GATEWAY_TOKEN` | Gateway device token | SSH into the VM and run `sudo -u openclaw openclaw setup` — the token is printed at the end of the interactive setup. Store it as a secret so it persists across reboots (the VM's credential paths are RAM-backed). |
+
+> **Note:** `OPENCLAW_GATEWAY_TOKEN` is auto-generated during deployment — you don't need to set it manually. If you want to run the full interactive setup wizard instead, SSH in and run `sudo -u openclaw openclaw setup`, then update the secret with the token it prints.
 
 #### Option A — CLI
 
 ```bash
-# 1. SSH in and run setup to get the gateway token
-gcloud compute ssh iap-vps --zone=us-central1-a --tunnel-through-iap
-sudo -u openclaw openclaw setup
-# Copy the token printed at the end
+# Update your API key (the secret already exists with a placeholder)
+gcloud secrets versions add ANTHROPIC_API_KEY \
+  --project=YOUR_PROJECT_ID \
+  --data-file=- <<< 'sk-ant-...'
 
-# 2. Store as secrets
-gcloud secrets create ANTHROPIC_API_KEY --project=YOUR_PROJECT_ID --data-file=- <<< 'sk-ant-...'
-gcloud secrets create OPENCLAW_GATEWAY_TOKEN --project=YOUR_PROJECT_ID --data-file=- <<< '<token-from-setup>'
-
-# 3. Restart to pick up new secrets
+# Restart to pick up the new secret
 gcloud compute ssh iap-vps --tunnel-through-iap \
   -- sudo systemctl restart openclaw-gateway
 ```
@@ -144,11 +150,9 @@ gcloud compute ssh iap-vps --tunnel-through-iap \
 #### Option B — GCP Console UI
 
 1. Open [Secret Manager](https://console.cloud.google.com/security/secret-manager) in the GCP Console
-2. Click **Create Secret**
-3. Set **Name** to `ANTHROPIC_API_KEY` and paste your API key as the **Secret value**
-4. Click **Create Secret**
-5. Repeat for `OPENCLAW_GATEWAY_TOKEN` (paste the token from `openclaw setup`)
-6. Restart the gateway to pick up the new secrets:
+2. Click `ANTHROPIC_API_KEY` → **New Version**
+3. Paste your API key and click **Add New Version**
+4. Restart the gateway to pick up the new secret:
    ```bash
    gcloud compute ssh iap-vps --tunnel-through-iap \
      -- sudo systemctl restart openclaw-gateway
@@ -156,17 +160,149 @@ gcloud compute ssh iap-vps --tunnel-through-iap \
 
 ### Optional secrets
 
-Add these as needed for your integrations:
+These are also pre-created with `DISABLED` as the value. Update the ones you need:
 
 | Secret | Value | Notes |
 |--------|-------|-------|
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (`123456:ABC-DEF...`) | From [@BotFather](https://t.me/BotFather) |
-| `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) | From Slack app settings |
-| `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`) | Required for Socket Mode (no public URL needed) |
+| `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) | See [Slack setup](#slack-setup) below |
+| `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`) | See [Slack setup](#slack-setup) below |
+| `DISCORD_BOT_TOKEN` | Discord bot token | From [Discord Developer Portal](https://discord.com/developers/applications) |
+| `OPENAI_API_KEY` | OpenAI API key | From [OpenAI Platform](https://platform.openai.com/api-keys) |
+| `OPENROUTER_API_KEY` | OpenRouter API key | From [OpenRouter](https://openrouter.ai/keys) |
+| `GEMINI_API_KEY` | Google Gemini API key | From [Google AI Studio](https://aistudio.google.com/apikey) |
+| `XAI_API_KEY` | xAI API key | From [xAI Console](https://console.x.ai/) |
+| `GROQ_API_KEY` | Groq API key | From [Groq Console](https://console.groq.com/keys) |
+| `MISTRAL_API_KEY` | Mistral API key | From [Mistral Console](https://console.mistral.ai/api-keys) |
+| `DEEPGRAM_API_KEY` | Deepgram API key | From [Deepgram Console](https://console.deepgram.com/) |
 
-> **Note:** This VM has no public IP, so Slack must use **Socket Mode** (the default). Socket Mode requires a `SLACK_APP_TOKEN` (`xapp-...`) — do not use `SLACK_SIGNING_SECRET`, which is for HTTP Events API mode and requires a publicly reachable URL.
+```bash
+# Example: enable Telegram
+gcloud secrets versions add TELEGRAM_BOT_TOKEN \
+  --project=YOUR_PROJECT_ID \
+  --data-file=- <<< '123456:ABC-DEF...'
+```
 
-### Update an existing secret
+### Slack setup
+
+This VM has no public IP, so Slack must use **Socket Mode** — a WebSocket connection initiated from the VM, requiring no inbound URL. This needs two tokens: a **Bot Token** (`xoxb-...`) and an **App-Level Token** (`xapp-...`).
+
+#### 1. Create a Slack app
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App** → **From scratch**
+2. Name your app (e.g. "OpenClaw") and select your workspace
+
+#### 2. Enable Socket Mode
+
+1. In the left sidebar, go to **Socket Mode**
+2. Toggle **Enable Socket Mode** to on
+3. You'll be prompted to create an app-level token — name it anything (e.g. "socket") and add the **`connections:write`** scope
+4. Click **Generate** — copy the `xapp-...` token → this is your `SLACK_APP_TOKEN`
+
+#### 3. Configure bot permissions
+
+1. In the left sidebar, go to **OAuth & Permissions**
+2. Under **Scopes → Bot Token Scopes**, add at minimum:
+   - `app_mentions:read` — so the bot can see when it's @mentioned
+   - `chat:write` — so the bot can send messages
+   - `im:history` — so the bot can read DMs
+   - `im:read` — so the bot can see DM conversations
+   - `im:write` — so the bot can open DMs
+3. If you want the bot to participate in channels (not just DMs), also add:
+   - `channels:history` — read messages in public channels
+   - `channels:read` — see public channel metadata
+   - `groups:history` — read messages in private channels
+
+#### 4. Enable Events
+
+1. In the left sidebar, go to **Event Subscriptions**
+2. Toggle **Enable Events** to on
+3. Under **Subscribe to bot events**, add:
+   - `app_mention` — triggers when someone @mentions the bot
+   - `message.im` — triggers on direct messages to the bot
+4. Click **Save Changes**
+
+#### 5. Install and get the bot token
+
+1. In the left sidebar, go to **Install App**
+2. Click **Install to Workspace** and authorize
+3. Copy the **Bot User OAuth Token** (`xoxb-...`) → this is your `SLACK_BOT_TOKEN`
+
+#### 6. Add the tokens to Secret Manager
+
+```bash
+gcloud secrets versions add SLACK_BOT_TOKEN \
+  --project=YOUR_PROJECT_ID \
+  --data-file=- <<< 'xoxb-your-token'
+
+gcloud secrets versions add SLACK_APP_TOKEN \
+  --project=YOUR_PROJECT_ID \
+  --data-file=- <<< 'xapp-your-token'
+
+# Restart to pick up the new secrets
+gcloud compute ssh iap-vps --tunnel-through-iap \
+  -- sudo systemctl restart openclaw-gateway
+```
+
+> **Do not** use `SLACK_SIGNING_SECRET` — that's for HTTP Events API mode which requires a publicly reachable URL. Socket Mode uses the `SLACK_APP_TOKEN` instead.
+
+#### 7. Connect through the Web UI
+
+Once the service restarts with your Slack tokens, open the OpenClaw web UI to verify the connection and manage channel settings.
+
+1. Start a port-forwarding tunnel (if you don't already have one open):
+   ```bash
+   gcloud compute ssh iap-vps \
+     --zone=us-central1-a \
+     --tunnel-through-iap \
+     -- -L 18789:localhost:18789
+   ```
+2. Open [http://localhost:18789](http://localhost:18789) in your browser
+3. On first visit you'll see **"pairing required"** — enter your **Gateway Token** on the Overview page and click **Connect**
+   - Your gateway token was auto-generated during deployment. Retrieve it with:
+     ```bash
+     gcloud secrets versions access latest \
+       --secret=OPENCLAW_GATEWAY_TOKEN \
+       --project=YOUR_PROJECT_ID
+     ```
+   - You can also append it to the URL: `http://localhost:18789?token=YOUR_GATEWAY_TOKEN`
+4. Once connected (green status indicator), navigate to **Settings → Config** — you should see Slack listed as a connected channel
+
+The Slack channel connects automatically via Socket Mode using the tokens you set as environment variables. No additional configuration is needed in the web UI unless you want to fine-tune settings like DM policy or channel allowlists.
+
+#### 8. Approve users (DM pairing)
+
+OpenClaw defaults to **pairing mode** for Slack DMs — when someone DMs your bot for the first time, they receive a short-lived pairing code and the bot won't respond until you approve it. This prevents strangers from using your bot.
+
+**From the Web UI:**
+
+1. A user DMs your bot in Slack and receives a message like: *"Your pairing code is: `GHI789`"*
+2. The user tells you the code
+3. In the OpenClaw Web UI chat, type: **"Approve Slack pairing code GHI789"**
+4. The user can now chat with the bot
+
+**From the terminal (via SSH):**
+
+```bash
+gcloud compute ssh iap-vps --tunnel-through-iap -- \
+  sudo -u openclaw openclaw pairing approve slack GHI789
+```
+
+**Useful pairing commands:**
+
+```bash
+# List pending and approved pairing codes
+gcloud compute ssh iap-vps --tunnel-through-iap -- \
+  sudo -u openclaw openclaw pairing list slack
+
+# Check for risky DM policy configurations
+gcloud compute ssh iap-vps --tunnel-through-iap -- \
+  sudo -u openclaw openclaw doctor
+```
+
+Pairing codes expire after about 1 hour. If a code expires, have the user DM the bot again to get a fresh one. Each approved user gets their own isolated conversation context.
+
+### Update a secret
 
 **CLI:**
 

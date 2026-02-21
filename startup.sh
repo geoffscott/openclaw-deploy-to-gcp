@@ -59,9 +59,15 @@ fetch_secrets() {
 
   # Extract secret names from JSON (projects/PROJECT/secrets/NAME → NAME)
   local secret_names
-  secret_names="$(echo "${list_response}" \
-    | grep -o '"name":"projects/[^"]*/secrets/[^"]*"' \
-    | sed 's|"name":"projects/[^"]*/secrets/||;s|"$||')"
+  if command -v jq &>/dev/null; then
+    secret_names="$(echo "${list_response}" \
+      | jq -r '.secrets[]?.name // empty' 2>/dev/null \
+      | sed 's|.*/||')"
+  else
+    secret_names="$(echo "${list_response}" \
+      | grep -o '"name" *: *"projects/[^"]*/secrets/[^"]*"' \
+      | sed 's|.*secrets/||;s|"$||')"
+  fi
 
   if [[ -z "${secret_names}" ]]; then
     log "No secrets found in project — skipping."
@@ -83,11 +89,19 @@ fetch_secrets() {
     }
 
     local payload
-    payload="$(echo "${response}" | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')"
+    if command -v jq &>/dev/null; then
+      payload="$(echo "${response}" | jq -r '.payload.data // empty' 2>/dev/null)"
+    else
+      payload="$(echo "${response}" | sed -n 's/.*"data" *: *"\([^"]*\)".*/\1/p')"
+    fi
 
     if [[ -n "${payload}" ]]; then
       local value
       value="$(echo "${payload}" | base64 -d)"
+      # Skip placeholder values — DISABLED/REPLACE_ME secrets should not be set
+      if [[ "${value}" == "DISABLED" || "${value}" == "REPLACE_ME" ]]; then
+        continue
+      fi
       echo "${secret_name}=${value}" >> "${tmp_env}"
       count=$((count + 1))
     fi
@@ -102,24 +116,27 @@ fetch_secrets() {
   return 0
 }
 
-# ─── Protect credential paths (tmpfs overlay) ───────────────────────────────
+# ─── Protect credential paths ─────────────────────────────────────────────
+# Secrets are already protected:
+#   • /run/openclaw/env  — tmpfs (RAM only), loaded from Secret Manager
+#   • ~/.openclaw/.env   — symlinked to /dev/null
+# The credentials directory is NOT mounted on tmpfs because OpenClaw stores
+# device tokens there; wiping them on reboot breaks Web UI reconnection.
 protect_credential_paths() {
-  local cred_tmpfs="/run/openclaw/credentials"
-  mkdir -p "${cred_tmpfs}"
-  chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${cred_tmpfs}"
-  chmod 700 "${cred_tmpfs}"
-
   # Ensure the openclaw state dir exists
   local state_dir="${OPENCLAW_HOME}/.openclaw"
   mkdir -p "${state_dir}"
   chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${state_dir}"
 
-  # Bind-mount tmpfs over credential paths so any file writes stay in RAM
+  # Ensure credentials dir exists with restricted permissions
   local cred_dir="${state_dir}/credentials"
   mkdir -p "${cred_dir}"
-  if ! mountpoint -q "${cred_dir}" 2>/dev/null; then
-    mount --bind "${cred_tmpfs}" "${cred_dir}"
-    log "Mounted tmpfs over ${cred_dir}"
+  chmod 700 "${cred_dir}"
+
+  # Unmount stale tmpfs bind-mount from previous versions if present
+  if mountpoint -q "${cred_dir}" 2>/dev/null; then
+    umount "${cred_dir}" 2>/dev/null || true
+    log "Removed tmpfs bind-mount from ${cred_dir} (device tokens now persist)"
   fi
 
   # Prevent .env files from being written to persistent disk
@@ -158,8 +175,12 @@ SM_BASE="https://secretmanager.googleapis.com/v1/projects/${PROJECT_ID}"
 
 # List all secrets in the project
 LIST="$(curl -sf -H "Authorization: Bearer ${TOKEN}" "${SM_BASE}/secrets" 2>/dev/null)" || exit 0
-NAMES="$(echo "${LIST}" | grep -o '"name":"projects/[^"]*/secrets/[^"]*"' \
-  | sed 's|"name":"projects/[^"]*/secrets/||;s|"$||')"
+if command -v jq &>/dev/null; then
+  NAMES="$(echo "${LIST}" | jq -r '.secrets[]?.name // empty' 2>/dev/null | sed 's|.*/||')"
+else
+  NAMES="$(echo "${LIST}" | grep -o '"name" *: *"projects/[^"]*/secrets/[^"]*"' \
+    | sed 's|.*secrets/||;s|"$||')"
+fi
 [[ -z "${NAMES}" ]] && exit 0
 
 # Fetch each secret's latest version
@@ -169,9 +190,15 @@ TMP="${SECRETS_ENV}.tmp"
 while IFS= read -r SECRET_NAME; do
   RESP="$(curl -sf -H "Authorization: Bearer ${TOKEN}" \
     "${SM_BASE}/secrets/${SECRET_NAME}/versions/latest:access" 2>/dev/null)" || continue
-  PAYLOAD="$(echo "${RESP}" | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')"
+  if command -v jq &>/dev/null; then
+    PAYLOAD="$(echo "${RESP}" | jq -r '.payload.data // empty' 2>/dev/null)"
+  else
+    PAYLOAD="$(echo "${RESP}" | sed -n 's/.*"data" *: *"\([^"]*\)".*/\1/p')"
+  fi
   [[ -z "${PAYLOAD}" ]] && continue
   VALUE="$(echo "${PAYLOAD}" | base64 -d)"
+  # Skip placeholder values — DISABLED/REPLACE_ME secrets should not be set
+  [[ "${VALUE}" == "DISABLED" || "${VALUE}" == "REPLACE_ME" ]] && continue
   echo "${SECRET_NAME}=${VALUE}" >> "${TMP}"
 done <<< "${NAMES}"
 
@@ -195,19 +222,40 @@ protect_credential_paths
 if [ -f "${SENTINEL_FILE}" ]; then
   log "Already provisioned. Ensuring service is running."
 
-  # Self-repair: ensure the service unit has --allow-unconfigured
+  # Always update the fetch-secrets helper so fixes propagate on reboot
+  install_fetch_script
+
+  # Self-repair: ensure the service unit has the correct ExecStart with --token
   UNIT_FILE="/etc/systemd/system/openclaw-gateway.service"
-  if [ -f "${UNIT_FILE}" ] && ! grep -q -- '--allow-unconfigured' "${UNIT_FILE}"; then
-    log "Updating service unit: adding --allow-unconfigured flag."
-    sed -i 's|gateway --port 18789 --verbose|gateway --port 18789 --verbose --allow-unconfigured|' "${UNIT_FILE}"
+  NEEDS_RELOAD=false
+
+  if [ -f "${UNIT_FILE}" ]; then
+    # Add --allow-unconfigured if missing
+    if ! grep -q -- '--allow-unconfigured' "${UNIT_FILE}"; then
+      log "Updating service unit: adding --allow-unconfigured flag."
+      sed -i 's|gateway --port 18789 --verbose|gateway --port 18789 --verbose --allow-unconfigured|' "${UNIT_FILE}"
+      NEEDS_RELOAD=true
+    fi
+
+    # Add --token via shell wrapper if missing (critical for Web UI auth)
+    if ! grep -q -- '--token' "${UNIT_FILE}"; then
+      log "Updating service unit: adding --token flag for gateway auth."
+      OPENCLAW_BIN="$(which openclaw 2>/dev/null || echo /usr/bin/openclaw)"
+      sed -i "s|^ExecStart=.*|ExecStart=/bin/sh -c 'exec ${OPENCLAW_BIN} gateway --port 18789 --verbose --allow-unconfigured \${OPENCLAW_GATEWAY_TOKEN:+--token \"\${OPENCLAW_GATEWAY_TOKEN}\"}'|" "${UNIT_FILE}"
+      NEEDS_RELOAD=true
+    fi
+
     if ! grep -q 'StartLimitBurst' "${UNIT_FILE}"; then
       sed -i '/^Wants=network-online.target$/a StartLimitIntervalSec=300\nStartLimitBurst=5' "${UNIT_FILE}"
+      NEEDS_RELOAD=true
     fi
-    systemctl daemon-reload
-    systemctl restart openclaw-gateway.service 2>/dev/null || true
-  else
-    systemctl start openclaw-gateway.service 2>/dev/null || true
   fi
+
+  if [ "${NEEDS_RELOAD}" = true ]; then
+    systemctl daemon-reload
+  fi
+  # Always restart so ExecStartPre re-fetches secrets with the updated helper
+  systemctl restart openclaw-gateway.service 2>/dev/null || true
 
   exit 0
 fi
@@ -218,7 +266,7 @@ log "Starting OpenClaw provisioning…"
 if ! command -v node &>/dev/null || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt "${NODE_MAJOR}" ]; then
   log "Installing Node.js ${NODE_MAJOR}…"
   apt-get update -qq
-  apt-get install -y -qq ca-certificates curl gnupg git
+  apt-get install -y -qq ca-certificates curl gnupg git jq
   mkdir -p /etc/apt/keyrings
   curl -fsSL "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key" \
     | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
@@ -264,7 +312,7 @@ ExecStartPre=+/usr/local/bin/fetch-openclaw-secrets
 # Load secrets from tmpfs (- prefix: don't fail if file is missing)
 EnvironmentFile=-${SECRETS_ENV}
 
-ExecStart=${OPENCLAW_BIN} gateway --port 18789 --verbose --allow-unconfigured
+ExecStart=/bin/sh -c 'exec ${OPENCLAW_BIN} gateway --port 18789 --verbose --allow-unconfigured \${OPENCLAW_GATEWAY_TOKEN:+--token "\${OPENCLAW_GATEWAY_TOKEN}"}'
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production
