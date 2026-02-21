@@ -467,6 +467,12 @@ if gcloud compute instances describe "${INSTANCE_NAME}" \
      --project="${PROJECT_ID}" &>/dev/null; then
   echo "  Instance already exists — skipping creation."
 
+  # Always update the startup script metadata so the VM gets the latest version on next boot.
+  gcloud compute instances add-metadata "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --metadata-from-file="startup-script=${SCRIPT_DIR}/startup.sh" \
+    --quiet 2>/dev/null && echo "  ✓ Startup script updated" || true
+
   # If Secret Manager is now ready but the VM has no service account, attach one.
   # This handles the case where the initial deploy ran before APIs were enabled.
   if [[ "${SM_READY}" == "true" ]]; then
