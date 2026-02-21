@@ -89,6 +89,7 @@ You only need to fill in the ones you want to use.
 | `DISCORD_BOT_TOKEN` | Channel | `DISABLED` |
 | `SLACK_BOT_TOKEN` | Channel | `DISABLED` |
 | `SLACK_APP_TOKEN` | Channel | `DISABLED` |
+| `OPENCLAW_GATEWAY_TOKEN` | Gateway | Auto-generated (hex) |
 | `OPENCLAW_PRIMARY_MODEL` | Gateway | `claude-sonnet-4-20250514` |
 
 Secrets left as `DISABLED` are ignored by OpenClaw.

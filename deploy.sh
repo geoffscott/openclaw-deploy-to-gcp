@@ -271,6 +271,9 @@ if [[ "${SM_READY}" == "true" ]]; then
   echo ""
   echo "▶ Pre-creating OpenClaw secrets (placeholders for unconfigured ones)…"
 
+  # Auto-generate a gateway token for API auth
+  GENERATED_GW_TOKEN="$(openssl rand -hex 32)"
+
   # Format: "SECRET_NAME|PLACEHOLDER|CATEGORY"
   # Categories: required, provider, channel, gateway
   OPENCLAW_SECRETS=(
@@ -297,6 +300,7 @@ if [[ "${SM_READY}" == "true" ]]; then
     "SLACK_APP_TOKEN|DISABLED|channel"
 
     # ── Gateway / auth ────────────────────────────────────────────────────
+    "OPENCLAW_GATEWAY_TOKEN|${GENERATED_GW_TOKEN}|gateway"
     "OPENCLAW_PRIMARY_MODEL|claude-sonnet-4-20250514|gateway"
   )
 
