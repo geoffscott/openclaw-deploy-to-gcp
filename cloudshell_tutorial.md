@@ -31,7 +31,7 @@ Key actions performed by the script:
 | Step | What happens |
 |------|-------------|
 | Enable APIs | `compute`, `iap`, `secretmanager`, `iam` |
-| Secret Manager | Creates a VM service account for reading secrets |
+| Secret Manager | Creates a VM service account + pre-creates all secrets with placeholders |
 | Firewall (allow) | SSH (`tcp:22`) from IAP range `35.235.240.0/20` only |
 | Firewall (deny) | Direct SSH from `0.0.0.0/0` blocked |
 | Cloud NAT | Outbound-only internet for the private VM |
@@ -68,32 +68,22 @@ The script is **idempotent** — safe to run multiple times.
 
 ---
 
-## Step 4 — Configure OpenClaw
+## Step 4 — Add your API key
 
-First, SSH into the VM and run the OpenClaw setup wizard to register the gateway:
+The deploy script pre-created all secrets with placeholder values. You just need to update the required one — your Anthropic API key:
 
 ```bash
-gcloud compute ssh iap-vps --zone=us-central1-a --tunnel-through-iap
-sudo -u openclaw openclaw setup
+gcloud secrets versions add ANTHROPIC_API_KEY --data-file=- <<< 'sk-ant-...'
 ```
 
-Copy the gateway token printed at the end of setup, then store it and your API keys as secrets. Each secret in the project becomes an environment variable for OpenClaw (injected at startup, never written to disk).
+Or open [Secret Manager](https://console.cloud.google.com/security/secret-manager) in the Console, click `ANTHROPIC_API_KEY` → **New Version**, and paste your key.
 
-**Using the CLI:**
+> **Gateway token:** `OPENCLAW_GATEWAY_TOKEN` was auto-generated during deployment. If you want to run the full interactive setup wizard instead, SSH in and run `sudo -u openclaw openclaw setup`, then update the secret with the token it prints.
 
-```bash
-gcloud secrets create OPENCLAW_GATEWAY_TOKEN --data-file=- <<< '<token-from-setup>'
-gcloud secrets create ANTHROPIC_API_KEY --data-file=- <<< 'sk-ant-...'
-```
-
-**Or using the GCP Console:**
-
-Open [Secret Manager](https://console.cloud.google.com/security/secret-manager), click **Create Secret**, and add each key-value pair.
-
-Then restart the service to load the new secrets:
+Then restart the service to load the real key:
 
 ```bash
-gcloud compute ssh iap-vps --tunnel-through-iap \
+gcloud compute ssh iap-vps --zone=us-central1-a --tunnel-through-iap \
   -- sudo systemctl restart openclaw-gateway
 ```
 
@@ -137,7 +127,24 @@ sudo systemctl restart openclaw-gateway
 
 ---
 
-## Step 7 — Verify access control
+## Step 7 — Access the Web UI
+
+The OpenClaw gateway runs on `localhost:18789` inside the VM. To open it in your browser, forward the port through the IAP tunnel:
+
+```bash
+gcloud compute ssh iap-vps \
+  --zone=us-central1-a \
+  --tunnel-through-iap \
+  -- -L 18789:localhost:18789
+```
+
+Then open [http://localhost:18789](http://localhost:18789) in your browser. The tunnel stays open as long as the SSH session is active.
+
+> **Tip:** If port 18789 is already in use on your machine, pick a different local port (e.g. `-L 8080:localhost:18789`) and open `http://localhost:8080` instead.
+
+---
+
+## Step 8 — Verify access control
 
 Confirm the instance has no external IP:
 
@@ -180,4 +187,4 @@ gcloud iam service-accounts delete iap-vps-vm-sa@YOUR_PROJECT_ID.iam.gserviceacc
 
 <walkthrough-conclusion-trophy></walkthrough-conclusion-trophy>
 
-**Deployment complete!** Your VPS is running OpenClaw with IAP-only access — no exposed ports, no public IP, secrets in RAM only. Add your API keys to Secret Manager and restart the service to get started.
+**Deployment complete!** Your VPS is running OpenClaw with IAP-only access — no exposed ports, no public IP, secrets in RAM only. Update your `ANTHROPIC_API_KEY` in Secret Manager, restart the service, and you're good to go.

@@ -12,6 +12,13 @@ Click the button below to open this repo in Cloud Shell and follow the interacti
 
 [![Deploy to GCP](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/geoffscott/openclaw-deploy-to-gcp&cloudshell_tutorial=cloudshell_tutorial.md)
 
+The tutorial will walk you through:
+
+1. **Select your project** — pick (or create) a dedicated GCP project
+2. **Run the deploy script** — creates the VM, firewall, NAT, and secrets
+3. **Add your API key** — update the `ANTHROPIC_API_KEY` secret with your real key
+4. **Access the Web UI** — port-forward through the IAP tunnel and open it in your browser
+
 ---
 
 ## What gets deployed
@@ -119,24 +126,23 @@ Each secret in the GCP project becomes an environment variable for OpenClaw. Cre
 
 ### Required secrets
 
+The deploy script pre-creates all secrets with placeholder values. You just need to update the ones you want to use.
+
 | Secret | Value | How to obtain |
 |--------|-------|---------------|
 | `ANTHROPIC_API_KEY` | Anthropic API key (`sk-ant-...`) | [Anthropic Console](https://console.anthropic.com/) → API Keys |
-| `OPENCLAW_GATEWAY_TOKEN` | Gateway device token | SSH into the VM and run `sudo -u openclaw openclaw setup` — the token is printed at the end of the interactive setup. Store it as a secret so it persists across reboots (the VM's credential paths are RAM-backed). |
+
+> **Note:** `OPENCLAW_GATEWAY_TOKEN` is auto-generated during deployment — you don't need to set it manually. If you want to run the full interactive setup wizard instead, SSH in and run `sudo -u openclaw openclaw setup`, then update the secret with the token it prints.
 
 #### Option A — CLI
 
 ```bash
-# 1. SSH in and run setup to get the gateway token
-gcloud compute ssh iap-vps --zone=us-central1-a --tunnel-through-iap
-sudo -u openclaw openclaw setup
-# Copy the token printed at the end
+# Update your API key (the secret already exists with a placeholder)
+gcloud secrets versions add ANTHROPIC_API_KEY \
+  --project=YOUR_PROJECT_ID \
+  --data-file=- <<< 'sk-ant-...'
 
-# 2. Store as secrets
-gcloud secrets create ANTHROPIC_API_KEY --project=YOUR_PROJECT_ID --data-file=- <<< 'sk-ant-...'
-gcloud secrets create OPENCLAW_GATEWAY_TOKEN --project=YOUR_PROJECT_ID --data-file=- <<< '<token-from-setup>'
-
-# 3. Restart to pick up new secrets
+# Restart to pick up the new secret
 gcloud compute ssh iap-vps --tunnel-through-iap \
   -- sudo systemctl restart openclaw-gateway
 ```
@@ -144,11 +150,9 @@ gcloud compute ssh iap-vps --tunnel-through-iap \
 #### Option B — GCP Console UI
 
 1. Open [Secret Manager](https://console.cloud.google.com/security/secret-manager) in the GCP Console
-2. Click **Create Secret**
-3. Set **Name** to `ANTHROPIC_API_KEY` and paste your API key as the **Secret value**
-4. Click **Create Secret**
-5. Repeat for `OPENCLAW_GATEWAY_TOKEN` (paste the token from `openclaw setup`)
-6. Restart the gateway to pick up the new secrets:
+2. Click `ANTHROPIC_API_KEY` → **New Version**
+3. Paste your API key and click **Add New Version**
+4. Restart the gateway to pick up the new secret:
    ```bash
    gcloud compute ssh iap-vps --tunnel-through-iap \
      -- sudo systemctl restart openclaw-gateway
@@ -156,7 +160,7 @@ gcloud compute ssh iap-vps --tunnel-through-iap \
 
 ### Optional secrets
 
-Add these as needed for your integrations:
+These are also pre-created with `DISABLED` as the value. Update the ones you need:
 
 | Secret | Value | Notes |
 |--------|-------|-------|
@@ -164,9 +168,16 @@ Add these as needed for your integrations:
 | `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) | From Slack app settings |
 | `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`) | Required for Socket Mode (no public URL needed) |
 
+```bash
+# Example: enable Telegram
+gcloud secrets versions add TELEGRAM_BOT_TOKEN \
+  --project=YOUR_PROJECT_ID \
+  --data-file=- <<< '123456:ABC-DEF...'
+```
+
 > **Note:** This VM has no public IP, so Slack must use **Socket Mode** (the default). Socket Mode requires a `SLACK_APP_TOKEN` (`xapp-...`) — do not use `SLACK_SIGNING_SECRET`, which is for HTTP Events API mode and requires a publicly reachable URL.
 
-### Update an existing secret
+### Update a secret
 
 **CLI:**
 
