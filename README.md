@@ -165,8 +165,16 @@ These are also pre-created with `DISABLED` as the value. Update the ones you nee
 | Secret | Value | Notes |
 |--------|-------|-------|
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (`123456:ABC-DEF...`) | From [@BotFather](https://t.me/BotFather) |
-| `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) | From Slack app settings |
-| `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`) | Required for Socket Mode (no public URL needed) |
+| `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) | See [Slack setup](#slack-setup) below |
+| `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`) | See [Slack setup](#slack-setup) below |
+| `DISCORD_BOT_TOKEN` | Discord bot token | From [Discord Developer Portal](https://discord.com/developers/applications) |
+| `OPENAI_API_KEY` | OpenAI API key | From [OpenAI Platform](https://platform.openai.com/api-keys) |
+| `OPENROUTER_API_KEY` | OpenRouter API key | From [OpenRouter](https://openrouter.ai/keys) |
+| `GEMINI_API_KEY` | Google Gemini API key | From [Google AI Studio](https://aistudio.google.com/apikey) |
+| `XAI_API_KEY` | xAI API key | From [xAI Console](https://console.x.ai/) |
+| `GROQ_API_KEY` | Groq API key | From [Groq Console](https://console.groq.com/keys) |
+| `MISTRAL_API_KEY` | Mistral API key | From [Mistral Console](https://console.mistral.ai/api-keys) |
+| `DEEPGRAM_API_KEY` | Deepgram API key | From [Deepgram Console](https://console.deepgram.com/) |
 
 ```bash
 # Example: enable Telegram
@@ -175,7 +183,67 @@ gcloud secrets versions add TELEGRAM_BOT_TOKEN \
   --data-file=- <<< '123456:ABC-DEF...'
 ```
 
-> **Note:** This VM has no public IP, so Slack must use **Socket Mode** (the default). Socket Mode requires a `SLACK_APP_TOKEN` (`xapp-...`) — do not use `SLACK_SIGNING_SECRET`, which is for HTTP Events API mode and requires a publicly reachable URL.
+### Slack setup
+
+This VM has no public IP, so Slack must use **Socket Mode** — a WebSocket connection initiated from the VM, requiring no inbound URL. This needs two tokens: a **Bot Token** (`xoxb-...`) and an **App-Level Token** (`xapp-...`).
+
+#### 1. Create a Slack app
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App** → **From scratch**
+2. Name your app (e.g. "OpenClaw") and select your workspace
+
+#### 2. Enable Socket Mode
+
+1. In the left sidebar, go to **Socket Mode**
+2. Toggle **Enable Socket Mode** to on
+3. You'll be prompted to create an app-level token — name it anything (e.g. "socket") and add the **`connections:write`** scope
+4. Click **Generate** — copy the `xapp-...` token → this is your `SLACK_APP_TOKEN`
+
+#### 3. Configure bot permissions
+
+1. In the left sidebar, go to **OAuth & Permissions**
+2. Under **Scopes → Bot Token Scopes**, add at minimum:
+   - `app_mentions:read` — so the bot can see when it's @mentioned
+   - `chat:write` — so the bot can send messages
+   - `im:history` — so the bot can read DMs
+   - `im:read` — so the bot can see DM conversations
+   - `im:write` — so the bot can open DMs
+3. If you want the bot to participate in channels (not just DMs), also add:
+   - `channels:history` — read messages in public channels
+   - `groups:history` — read messages in private channels
+
+#### 4. Enable Events
+
+1. In the left sidebar, go to **Event Subscriptions**
+2. Toggle **Enable Events** to on
+3. Under **Subscribe to bot events**, add:
+   - `app_mention` — triggers when someone @mentions the bot
+   - `message.im` — triggers on direct messages to the bot
+4. Click **Save Changes**
+
+#### 5. Install and get the bot token
+
+1. In the left sidebar, go to **Install App**
+2. Click **Install to Workspace** and authorize
+3. Copy the **Bot User OAuth Token** (`xoxb-...`) → this is your `SLACK_BOT_TOKEN`
+
+#### 6. Add the tokens to Secret Manager
+
+```bash
+gcloud secrets versions add SLACK_BOT_TOKEN \
+  --project=YOUR_PROJECT_ID \
+  --data-file=- <<< 'xoxb-your-token'
+
+gcloud secrets versions add SLACK_APP_TOKEN \
+  --project=YOUR_PROJECT_ID \
+  --data-file=- <<< 'xapp-your-token'
+
+# Restart to pick up the new secrets
+gcloud compute ssh iap-vps --tunnel-through-iap \
+  -- sudo systemctl restart openclaw-gateway
+```
+
+> **Do not** use `SLACK_SIGNING_SECRET` — that's for HTTP Events API mode which requires a publicly reachable URL. Socket Mode uses the `SLACK_APP_TOKEN` instead.
 
 ### Update a secret
 
