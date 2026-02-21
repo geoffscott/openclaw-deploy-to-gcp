@@ -210,6 +210,7 @@ This VM has no public IP, so Slack must use **Socket Mode** — a WebSocket conn
    - `im:write` — so the bot can open DMs
 3. If you want the bot to participate in channels (not just DMs), also add:
    - `channels:history` — read messages in public channels
+   - `channels:read` — see public channel metadata
    - `groups:history` — read messages in private channels
 
 #### 4. Enable Events
@@ -244,6 +245,62 @@ gcloud compute ssh iap-vps --tunnel-through-iap \
 ```
 
 > **Do not** use `SLACK_SIGNING_SECRET` — that's for HTTP Events API mode which requires a publicly reachable URL. Socket Mode uses the `SLACK_APP_TOKEN` instead.
+
+#### 7. Connect through the Web UI
+
+Once the service restarts with your Slack tokens, open the OpenClaw web UI to verify the connection and manage channel settings.
+
+1. Start a port-forwarding tunnel (if you don't already have one open):
+   ```bash
+   gcloud compute ssh iap-vps \
+     --zone=us-central1-a \
+     --tunnel-through-iap \
+     -- -L 18789:localhost:18789
+   ```
+2. Open [http://localhost:18789](http://localhost:18789) in your browser
+3. On first visit you'll see **"pairing required"** — enter your **Gateway Token** on the Overview page and click **Connect**
+   - Your gateway token was auto-generated during deployment. Retrieve it with:
+     ```bash
+     gcloud secrets versions access latest \
+       --secret=OPENCLAW_GATEWAY_TOKEN \
+       --project=YOUR_PROJECT_ID
+     ```
+   - You can also append it to the URL: `http://localhost:18789?token=YOUR_GATEWAY_TOKEN`
+4. Once connected (green status indicator), navigate to **Settings → Config** — you should see Slack listed as a connected channel
+
+The Slack channel connects automatically via Socket Mode using the tokens you set as environment variables. No additional configuration is needed in the web UI unless you want to fine-tune settings like DM policy or channel allowlists.
+
+#### 8. Approve users (DM pairing)
+
+OpenClaw defaults to **pairing mode** for Slack DMs — when someone DMs your bot for the first time, they receive a short-lived pairing code and the bot won't respond until you approve it. This prevents strangers from using your bot.
+
+**From the Web UI:**
+
+1. A user DMs your bot in Slack and receives a message like: *"Your pairing code is: `GHI789`"*
+2. The user tells you the code
+3. In the OpenClaw Web UI chat, type: **"Approve Slack pairing code GHI789"**
+4. The user can now chat with the bot
+
+**From the terminal (via SSH):**
+
+```bash
+gcloud compute ssh iap-vps --tunnel-through-iap -- \
+  sudo -u openclaw openclaw pairing approve slack GHI789
+```
+
+**Useful pairing commands:**
+
+```bash
+# List pending and approved pairing codes
+gcloud compute ssh iap-vps --tunnel-through-iap -- \
+  sudo -u openclaw openclaw pairing list slack
+
+# Check for risky DM policy configurations
+gcloud compute ssh iap-vps --tunnel-through-iap -- \
+  sudo -u openclaw openclaw doctor
+```
+
+Pairing codes expire after about 1 hour. If a code expires, have the user DM the bot again to get a fresh one. Each approved user gets their own isolated conversation context.
 
 ### Update a secret
 
