@@ -264,6 +264,98 @@ else
   echo "  ⚠  Secret Manager API not enabled — skipping."
 fi
 
+# ─── Pre-create OpenClaw secrets (placeholder values) ─────────────────────
+# Creates secrets that don't exist yet so the user only needs to fill in values.
+# Required secrets get a "REPLACE_ME" placeholder; optional ones get "DISABLED".
+if [[ "${SM_READY}" == "true" ]]; then
+  echo ""
+  echo "▶ Pre-creating OpenClaw secrets (placeholders for unconfigured ones)…"
+
+  # Format: "SECRET_NAME|PLACEHOLDER|CATEGORY"
+  # Categories: required, provider, channel, gateway
+  OPENCLAW_SECRETS=(
+    # ── Required ──────────────────────────────────────────────────────────
+    "ANTHROPIC_API_KEY|REPLACE_ME|required"
+
+    # ── Optional AI providers ─────────────────────────────────────────────
+    "OPENAI_API_KEY|DISABLED|provider"
+    "OPENROUTER_API_KEY|DISABLED|provider"
+    "GEMINI_API_KEY|DISABLED|provider"
+    "XAI_API_KEY|DISABLED|provider"
+    "GROQ_API_KEY|DISABLED|provider"
+    "MISTRAL_API_KEY|DISABLED|provider"
+    "DEEPGRAM_API_KEY|DISABLED|provider"
+
+    # ── Channel: Telegram ─────────────────────────────────────────────────
+    "TELEGRAM_BOT_TOKEN|DISABLED|channel"
+
+    # ── Channel: Discord ──────────────────────────────────────────────────
+    "DISCORD_BOT_TOKEN|DISABLED|channel"
+
+    # ── Channel: Slack ────────────────────────────────────────────────────
+    "SLACK_BOT_TOKEN|DISABLED|channel"
+    "SLACK_APP_TOKEN|DISABLED|channel"
+
+    # ── Gateway / auth ────────────────────────────────────────────────────
+    "OPENCLAW_PRIMARY_MODEL|claude-sonnet-4-20250514|gateway"
+  )
+
+  CREATED=0
+  EXISTING=0
+
+  for ENTRY in "${OPENCLAW_SECRETS[@]}"; do
+    SECRET_NAME="${ENTRY%%|*}"
+    REST="${ENTRY#*|}"
+    PLACEHOLDER="${REST%%|*}"
+    CATEGORY="${REST#*|}"
+
+    if gcloud secrets describe "${SECRET_NAME}" \
+         --project="${PROJECT_ID}" &>/dev/null; then
+      EXISTING=$((EXISTING + 1))
+    else
+      printf '%s' "${PLACEHOLDER}" \
+        | gcloud secrets create "${SECRET_NAME}" \
+            --project="${PROJECT_ID}" \
+            --data-file=- \
+            --quiet 2>/dev/null && {
+        CREATED=$((CREATED + 1))
+      } || {
+        echo "  ✗ Could not create secret ${SECRET_NAME}"
+      }
+    fi
+  done
+
+  echo "  ✓ Secrets: ${CREATED} created, ${EXISTING} already existed"
+
+  # Show which required secrets still need real values
+  NEEDS_UPDATE=()
+  for ENTRY in "${OPENCLAW_SECRETS[@]}"; do
+    SECRET_NAME="${ENTRY%%|*}"
+    REST="${ENTRY#*|}"
+    PLACEHOLDER="${REST%%|*}"
+    CATEGORY="${REST#*|}"
+
+    if [[ "${CATEGORY}" == "required" ]]; then
+      CURRENT_VALUE="$(gcloud secrets versions access latest \
+        --secret="${SECRET_NAME}" --project="${PROJECT_ID}" 2>/dev/null)" || continue
+      if [[ "${CURRENT_VALUE}" == "REPLACE_ME" ]]; then
+        NEEDS_UPDATE+=("${SECRET_NAME}")
+      fi
+    fi
+  done
+
+  if [[ ${#NEEDS_UPDATE[@]} -gt 0 ]]; then
+    echo ""
+    echo "  ⚠ Required secrets that still need real values:"
+    for S in "${NEEDS_UPDATE[@]}"; do
+      echo "      • ${S}"
+    done
+    echo ""
+    echo "    Update with:"
+    echo "      gcloud secrets versions add SECRET_NAME --project=${PROJECT_ID} --data-file=- <<< 'real-value'"
+  fi
+fi
+
 if [[ "${SM_READY}" != "true" ]]; then
   echo ""
   echo "  To enable Secret Manager, a project Owner should run:"
@@ -487,9 +579,18 @@ SECRET_COUNT="$(gcloud secrets list --project="${PROJECT_ID}" \
   --format="value(name)" 2>/dev/null | wc -l)" || SECRET_COUNT=0
 if [[ "${SECRET_COUNT}" -gt 0 ]]; then
   echo "  ✓ Secret Manager: ${SECRET_COUNT} secret(s) found"
+  # Check if ANTHROPIC_API_KEY has a real value
+  ANTHRO_VAL="$(gcloud secrets versions access latest \
+    --secret="ANTHROPIC_API_KEY" --project="${PROJECT_ID}" 2>/dev/null)" || ANTHRO_VAL=""
+  if [[ "${ANTHRO_VAL}" == "REPLACE_ME" || -z "${ANTHRO_VAL}" ]]; then
+    echo "  ⚠ ANTHROPIC_API_KEY still needs a real value"
+    HEALTH_ISSUES=$((HEALTH_ISSUES + 1))
+  else
+    echo "  ✓ ANTHROPIC_API_KEY is configured"
+  fi
 else
   echo "  ⚠ No secrets in Secret Manager yet"
-  echo "    Create secrets with: gcloud secrets create SECRET_NAME --project=${PROJECT_ID} --data-file=- <<< 'value'"
+  HEALTH_ISSUES=$((HEALTH_ISSUES + 1))
 fi
 
 if [[ "${HEALTH_ISSUES}" -gt 0 ]]; then
@@ -540,18 +641,29 @@ echo "  The tunnel stays open as long as the SSH session is active."
 echo ""
 echo "  ── Secrets Management ──────────────────────────────────"
 echo ""
-echo "  Each secret in this project becomes an environment variable."
-echo "  Create one secret per key (never stored on disk):"
+echo "  Secrets are pre-created with placeholder values."
+echo "  Update the required one(s) with real values:"
 echo ""
-echo "    gcloud secrets create ANTHROPIC_API_KEY \\"
+echo "    gcloud secrets versions add ANTHROPIC_API_KEY \\"
 echo "      --project=${PROJECT_ID} \\"
-echo "      --data-file=- <<< 'sk-ant-...'"
+echo "      --data-file=- <<< 'sk-ant-api03-...'"
 echo ""
-echo "    gcloud secrets create SLACK_BOT_TOKEN \\"
-echo "      --project=${PROJECT_ID} \\"
-echo "      --data-file=- <<< 'xoxb-...'"
+echo "  Optional — enable channels by updating their tokens:"
 echo ""
-echo "  Then restart the service to pick up new secrets:"
+echo "    gcloud secrets versions add TELEGRAM_BOT_TOKEN \\"
+echo "      --project=${PROJECT_ID} --data-file=- <<< 'bot-token'"
+echo ""
+echo "    gcloud secrets versions add DISCORD_BOT_TOKEN \\"
+echo "      --project=${PROJECT_ID} --data-file=- <<< 'bot-token'"
+echo ""
+echo "    gcloud secrets versions add SLACK_BOT_TOKEN \\"
+echo "      --project=${PROJECT_ID} --data-file=- <<< 'xoxb-...'"
+echo "    gcloud secrets versions add SLACK_APP_TOKEN \\"
+echo "      --project=${PROJECT_ID} --data-file=- <<< 'xapp-...'"
+echo ""
+echo "  List all secrets:  gcloud secrets list --project=${PROJECT_ID}"
+echo ""
+echo "  After updating secrets, restart the service:"
 echo ""
 echo "    gcloud compute ssh ${INSTANCE_NAME} --tunnel-through-iap \\"
 echo "      --project=${PROJECT_ID} --zone=${ZONE} \\"
@@ -559,4 +671,5 @@ echo "      -- sudo systemctl restart openclaw-gateway"
 echo ""
 echo "  ⚠  This project should be dedicated to this deployment."
 echo "     All secrets in the project are loaded into OpenClaw."
+echo "     Secrets set to \"DISABLED\" are ignored by OpenClaw."
 echo "════════════════════════════════════════════════════════════"
