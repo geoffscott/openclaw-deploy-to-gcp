@@ -592,6 +592,16 @@ if [[ "${SECRET_COUNT}" -gt 0 ]]; then
   else
     echo "  ✓ ANTHROPIC_API_KEY is configured"
   fi
+
+  # Check if OPENCLAW_GATEWAY_TOKEN exists (critical for client connectivity)
+  GW_TOKEN_VAL="$(gcloud secrets versions access latest \
+    --secret="OPENCLAW_GATEWAY_TOKEN" --project="${PROJECT_ID}" 2>/dev/null)" || GW_TOKEN_VAL=""
+  if [[ -z "${GW_TOKEN_VAL}" ]]; then
+    echo "  ✗ OPENCLAW_GATEWAY_TOKEN is missing — clients will get 'device token mismatch'"
+    HEALTH_ISSUES=$((HEALTH_ISSUES + 1))
+  else
+    echo "  ✓ OPENCLAW_GATEWAY_TOKEN is configured"
+  fi
 else
   echo "  ⚠ No secrets in Secret Manager yet"
   HEALTH_ISSUES=$((HEALTH_ISSUES + 1))
