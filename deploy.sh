@@ -59,11 +59,18 @@ check_deployer_permissions() {
   echo "▶ Checking deployer permissions…"
   echo "  Account: ${deployer_email:-<unknown>}"
 
-  # If we can't determine the account at all, warn but don't block.
+  # If we can't determine the account, nothing will work — exit immediately.
   if [[ -z "${deployer_email}" ]]; then
-    echo "  ⚠  Could not determine active account — skipping permission check."
-    echo "     Run 'gcloud auth login' if you haven't authenticated."
-    return 0
+    echo ""
+    echo "  ✗ No active gcloud account found."
+    echo ""
+    echo "  The deploy script requires an authenticated Google Cloud account."
+    echo "  Please run:"
+    echo ""
+    echo "    gcloud auth login"
+    echo ""
+    echo "  Then re-run this script."
+    exit 1
   fi
 
   # For human user accounts (not service accounts), skip API-based probes.
@@ -193,15 +200,36 @@ if gcloud services enable ${REQUIRED_APIS} \
   --quiet 2>/dev/null; then
   echo "  ✓ APIs enabled"
 else
-  echo "  ⚠  Could not enable APIs (may lack serviceusage permissions)."
+  echo "  ⚠  Could not enable APIs (may lack serviceusage permissions or billing is not enabled)."
   echo "     Checking if they are already enabled…"
   MISSING_APIS=""
+  ENABLED_APIS=""
   for API in ${REQUIRED_APIS}; do
     if ! gcloud services list --project="${PROJECT_ID}" --filter="name:${API}" --format="value(name)" 2>/dev/null | grep -q "${API}"; then
       MISSING_APIS="${MISSING_APIS} ${API}"
+    else
+      ENABLED_APIS="${ENABLED_APIS} ${API}"
     fi
   done
   if [[ -n "${MISSING_APIS}" ]]; then
+    # If zero APIs are enabled, this is a fresh/unbilled project — nothing will work.
+    if [[ -z "${ENABLED_APIS}" ]]; then
+      echo ""
+      echo "  ✗ No required APIs are enabled and automatic enablement failed."
+      echo ""
+      echo "  This usually means billing is not configured on this project."
+      echo "  Please:"
+      echo ""
+      echo "    1. Enable billing:"
+      echo "       https://console.cloud.google.com/billing/linkedaccount?project=${PROJECT_ID}"
+      echo ""
+      echo "    2. Enable the required APIs:"
+      echo "       gcloud services enable${MISSING_APIS} \\"
+      echo "         --project=${PROJECT_ID}"
+      echo ""
+      echo "    3. Re-run this script."
+      exit 1
+    fi
     echo "  ⚠  Missing APIs:${MISSING_APIS}"
     echo "     A project Owner should run:"
     echo "       gcloud services enable${MISSING_APIS} --project=${PROJECT_ID}"

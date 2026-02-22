@@ -4,9 +4,27 @@ This tutorial walks you through deploying a secure virtual machine with [OpenCla
 
 ---
 
-## Step 1 — Select your project
+## Step 1 — Prerequisites
 
-Make sure you are working in the right GCP project.
+Before deploying, make sure your Cloud Shell session is authenticated, your project has billing enabled, and the correct project is selected.
+
+### Authenticate
+
+Cloud Shell is usually pre-authenticated, but sessions opened via a repo link may not be. Verify you have an active account:
+
+```bash
+gcloud auth list
+```
+
+If no account is listed (or the output is empty), authenticate:
+
+```bash
+gcloud auth login
+```
+
+### Select your project
+
+Set the project you want to deploy into:
 
 ```bash
 gcloud config set project <YOUR_PROJECT_ID>
@@ -17,6 +35,12 @@ You can list your projects with:
 ```bash
 gcloud projects list
 ```
+
+### Enable billing
+
+If this is a **new project**, billing must be enabled before any resources can be created. Open the [Billing page](https://console.cloud.google.com/billing/linkedaccount) in the GCP Console and link a billing account.
+
+> **Tip:** The deploy script enables APIs automatically, but this requires billing to be active on the project. If you see "Billing must be enabled" errors, visit the link above.
 
 Click **Next** when ready.
 
