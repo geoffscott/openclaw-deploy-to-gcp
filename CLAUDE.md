@@ -126,7 +126,7 @@ gcloud compute ssh iap-vps --zone=us-central1-a \
 | Layer | Mechanism |
 |-------|-----------|
 | Metadata server | iptables blocks `openclaw` user from `169.254.169.254` (prevents token theft) |
-| OAuth scopes | Narrowed to `secretmanager`, `logging.write`, `monitoring.write` only |
+| OAuth scopes | `cloud-platform` (required by Secret Manager; access limited by SA's IAM roles to secrets + logging + monitoring only) |
 | Systemd sandbox | `ProtectSystem=strict`, `NoNewPrivileges`, `CapabilityBoundingSet=` (empty), syscall filtering |
 | Network | Port 18789 denied at firewall; SSH only via IAP (priority 500) |
 | OS patching | `unattended-upgrades` with automatic reboot at 04:00 |
