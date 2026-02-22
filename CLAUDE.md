@@ -50,6 +50,8 @@ gcloud services enable \
   secretmanager.googleapis.com \
   iam.googleapis.com \
   cloudresourcemanager.googleapis.com \
+  logging.googleapis.com \
+  monitoring.googleapis.com \
   --project=YOUR_PROJECT_ID
 ```
 
@@ -116,8 +118,20 @@ gcloud compute ssh iap-vps --zone=us-central1-a \
 | Path | Protection |
 |------|-----------|
 | `/run/openclaw/env` | tmpfs — secrets exist only in RAM |
-| `~/.openclaw/credentials/` | Bind-mounted to tmpfs |
+| `~/.openclaw/credentials/` | Restricted permissions (persists device tokens) |
 | `~/.openclaw/.env` | Symlinked to `/dev/null` |
+
+### Runtime security hardening
+
+| Layer | Mechanism |
+|-------|-----------|
+| Metadata server | iptables blocks `openclaw` user from `169.254.169.254` (prevents token theft) |
+| OAuth scopes | Narrowed to `secretmanager`, `logging.write`, `monitoring.write` only |
+| Systemd sandbox | `ProtectSystem=strict`, `NoNewPrivileges`, `CapabilityBoundingSet=` (empty), syscall filtering |
+| Network | Port 18789 denied at firewall; SSH only via IAP (priority 500) |
+| OS patching | `unattended-upgrades` with automatic reboot at 04:00 |
+| Audit trail | Cloud Ops Agent forwards journal + syslog + auth.log to Cloud Logging |
+| Secret parsing | `jq` for JSON; values sanitized (newlines stripped) to prevent env injection |
 
 ## Verifying provisioned resources
 
@@ -137,7 +151,7 @@ gcloud compute firewall-rules list \
 
 # APIs enabled
 gcloud services list --project="${GCP_PROJECT_ID}" \
-  --filter="name:(compute.googleapis.com OR iap.googleapis.com OR secretmanager.googleapis.com)" \
+  --filter="name:(compute.googleapis.com OR iap.googleapis.com OR secretmanager.googleapis.com OR logging.googleapis.com OR monitoring.googleapis.com)" \
   --format="table(name,state)"
 
 # IAP IAM binding
@@ -170,7 +184,7 @@ gcloud compute ssh iap-vps --zone=us-central1-a \
 ```bash
 gcloud compute instances delete iap-vps --zone=us-central1-a \
   --project="${GCP_PROJECT_ID}" --quiet
-gcloud compute firewall-rules delete allow-iap-ssh allow-iap-ssh-deny-public \
+gcloud compute firewall-rules delete allow-iap-ssh allow-iap-ssh-deny-public iap-vps-deny-openclaw-port \
   --project="${GCP_PROJECT_ID}" --quiet
 gcloud compute routers nats delete iap-vps-nat \
   --router=iap-vps-router --region=us-central1 \

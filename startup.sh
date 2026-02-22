@@ -102,7 +102,10 @@ fetch_secrets() {
       if [[ "${value}" == "DISABLED" || "${value}" == "REPLACE_ME" ]]; then
         continue
       fi
-      echo "${secret_name}=${value}" >> "${tmp_env}"
+      # Strip newlines/carriage returns to prevent env file injection
+      local sanitized
+      sanitized="$(printf '%s' "${value}" | tr -d '\n\r')"
+      printf '%s=%s\n' "${secret_name}" "${sanitized}" >> "${tmp_env}"
       count=$((count + 1))
     fi
   done <<< "${secret_names}"
@@ -199,24 +202,47 @@ while IFS= read -r SECRET_NAME; do
   VALUE="$(echo "${PAYLOAD}" | base64 -d)"
   # Skip placeholder values — DISABLED/REPLACE_ME secrets should not be set
   [[ "${VALUE}" == "DISABLED" || "${VALUE}" == "REPLACE_ME" ]] && continue
-  echo "${SECRET_NAME}=${VALUE}" >> "${TMP}"
+  # Strip newlines/carriage returns to prevent env file injection
+  SANITIZED="$(printf '%s' "${VALUE}" | tr -d '\n\r')"
+  printf '%s=%s\n' "${SECRET_NAME}" "${SANITIZED}" >> "${TMP}"
 done <<< "${NAMES}"
 
 mv "${TMP}" "${SECRETS_ENV}"
 chown openclaw:openclaw "${SECRETS_ENV}"
 chmod 600 "${SECRETS_ENV}"
 FETCHSCRIPT
-  chmod 755 /usr/local/bin/fetch-openclaw-secrets
+  chmod 700 /usr/local/bin/fetch-openclaw-secrets
 }
 
 # ─── Try to fetch secrets on every boot ──────────────────────────────────────
 # Ensure the user exists first (needed for chown in fetch_secrets)
 if ! id "${OPENCLAW_USER}" &>/dev/null; then
-  useradd --system --create-home --shell /bin/bash "${OPENCLAW_USER}"
+  useradd --system --create-home --shell /usr/sbin/nologin "${OPENCLAW_USER}"
 fi
 
 fetch_secrets || true
 protect_credential_paths
+
+# ─── Block metadata server access for the openclaw user ──────────────────────
+# The VM service account token is available at http://169.254.169.254 (the GCE
+# metadata server). A compromised OpenClaw process could steal this token and
+# exfiltrate all secrets from Secret Manager. Block the openclaw user while
+# allowing root (needed by ExecStartPre=+ fetch-openclaw-secrets).
+restrict_metadata_access() {
+  if ! iptables -C OUTPUT -d 169.254.169.254 -m owner --uid-owner "${OPENCLAW_USER}" -j DROP 2>/dev/null; then
+    iptables -A OUTPUT -d 169.254.169.254 -m owner --uid-owner "${OPENCLAW_USER}" -j DROP
+    log "Blocked metadata server access for user '${OPENCLAW_USER}'"
+  else
+    log "Metadata server block already in place"
+  fi
+
+  # Persist across reboots (iptables-persistent installed during provisioning)
+  if command -v iptables-save &>/dev/null; then
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules.v4
+  fi
+}
+restrict_metadata_access
 
 # ─── Already provisioned? Just ensure the service is running ─────────────────
 if [ -f "${SENTINEL_FILE}" ]; then
@@ -225,11 +251,19 @@ if [ -f "${SENTINEL_FILE}" ]; then
   # Always update the fetch-secrets helper so fixes propagate on reboot
   install_fetch_script
 
-  # Self-repair: ensure the service unit has the correct ExecStart with --token
+  # Self-repair: detect outdated unit files and patch or re-provision
   UNIT_FILE="/etc/systemd/system/openclaw-gateway.service"
   NEEDS_RELOAD=false
 
   if [ -f "${UNIT_FILE}" ]; then
+    # If sandboxing directives are missing, the unit needs full regeneration
+    if ! grep -q 'ProtectSystem=strict' "${UNIT_FILE}"; then
+      log "Service unit is outdated (missing sandboxing) — re-provisioning."
+      rm -f "${SENTINEL_FILE}"
+      exec "$0"
+    fi
+
+    # Incremental fixes for smaller changes
     # Add --allow-unconfigured if missing
     if ! grep -q -- '--allow-unconfigured' "${UNIT_FILE}"; then
       log "Updating service unit: adding --allow-unconfigured flag."
@@ -273,7 +307,7 @@ log "Starting OpenClaw provisioning…"
 if ! command -v node &>/dev/null || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt "${NODE_MAJOR}" ]; then
   log "Installing Node.js ${NODE_MAJOR}…"
   apt-get update -qq
-  apt-get install -y -qq ca-certificates curl gnupg git jq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl gnupg git jq iptables-persistent
   mkdir -p /etc/apt/keyrings
   curl -fsSL "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key" \
     | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
@@ -283,6 +317,62 @@ if ! command -v node &>/dev/null || [ "$(node --version | cut -d. -f1 | tr -d v)
   apt-get install -y -qq nodejs
 fi
 log "Node.js version: $(node --version)"
+
+# ─── 1b. Install and configure unattended security upgrades ──────────────────
+if ! dpkg -l unattended-upgrades &>/dev/null; then
+  log "Installing unattended-upgrades…"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades apt-listchanges
+
+  cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'UUCFG'
+Unattended-Upgrade::Origins-Pattern {
+    "origin=Debian,codename=${distro_codename},label=Debian-Security";
+    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "04:00";
+UUCFG
+
+  cat > /etc/apt/apt.conf.d/20auto-upgrades <<'AUTOCFG'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+AUTOCFG
+
+  log "  Unattended security upgrades configured (auto-reboot at 04:00)"
+fi
+
+# ─── 1c. Install Google Cloud Ops Agent for centralized logging ──────────────
+if ! systemctl is-active --quiet google-cloud-ops-agent 2>/dev/null; then
+  log "Installing Google Cloud Ops Agent…"
+  curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
+  bash add-google-cloud-ops-agent-repo.sh --also-install
+  rm -f add-google-cloud-ops-agent-repo.sh
+
+  mkdir -p /etc/google-cloud-ops-agent
+  cat > /etc/google-cloud-ops-agent/config.yaml <<'OPSCONFIG'
+logging:
+  receivers:
+    openclaw_journal:
+      type: systemd_journald
+      units:
+        - openclaw-gateway
+    syslog:
+      type: files
+      include_paths:
+        - /var/log/syslog
+        - /var/log/auth.log
+  service:
+    pipelines:
+      default_pipeline:
+        receivers: [openclaw_journal, syslog]
+OPSCONFIG
+
+  systemctl restart google-cloud-ops-agent
+  log "  Cloud Ops Agent installed and configured"
+fi
 
 # ─── 2. Install OpenClaw globally ───────────────────────────────────────────
 if ! command -v openclaw &>/dev/null; then
@@ -326,6 +416,45 @@ Environment=NODE_ENV=production
 
 # Prevent OpenClaw from writing secrets to persistent disk
 Environment=OPENCLAW_STATE_DIR=${OPENCLAW_HOME}/.openclaw
+
+# ── Systemd Sandboxing ──────────────────────────────
+# Filesystem restrictions
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/openclaw ${OPENCLAW_HOME}/.openclaw
+PrivateTmp=true
+
+# Kernel and device isolation
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+PrivateDevices=true
+DevicePolicy=closed
+
+# Network — only IPv4/IPv6/Unix (no raw, netlink, etc.)
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Capabilities — drop everything
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+
+# System call filtering — allow only what Node.js needs
+# Note: MemoryDenyWriteExecute is intentionally omitted (breaks V8 JIT)
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @reboot @swap @clock @module @raw-io @obsolete @debug
+SystemCallArchitectures=native
+
+# Misc hardening
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RemoveIPC=true
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
