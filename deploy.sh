@@ -50,9 +50,33 @@ check_deployer_permissions() {
   local deployer_email
   deployer_email="$(gcloud config get-value account 2>/dev/null)"
 
-  echo "▶ Checking deployer permissions…"
-  echo "  Account: ${deployer_email}"
+  # Fallback: gcloud config may not have the account in some environments (e.g.
+  # Cloud Shell with only ADC, or fresh sessions). Try gcloud auth list instead.
+  if [[ -z "${deployer_email}" ]]; then
+    deployer_email="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)"
+  fi
 
+  echo "▶ Checking deployer permissions…"
+  echo "  Account: ${deployer_email:-<unknown>}"
+
+  # If we can't determine the account at all, warn but don't block.
+  if [[ -z "${deployer_email}" ]]; then
+    echo "  ⚠  Could not determine active account — skipping permission check."
+    echo "     Run 'gcloud auth login' if you haven't authenticated."
+    return 0
+  fi
+
+  # For human user accounts (not service accounts), skip API-based probes.
+  # On a fresh project the APIs aren't enabled yet, so every probe fails —
+  # this incorrectly reports "missing roles" for users who are actually Owners.
+  # Let the actual gcloud commands later in the script surface real errors.
+  if [[ "${deployer_email}" != *"iam.gserviceaccount.com" ]]; then
+    echo "  ✓ Running as user account — permission checks deferred to actual commands."
+    return 0
+  fi
+
+  # Service accounts need explicit role grants, and the project owner who
+  # created them has presumably already enabled the required APIs.
   # Probe each required permission with a lightweight read-only gcloud command.
   # Uses --quiet to prevent interactive prompts and timeout to prevent hangs.
   local missing_roles=()
