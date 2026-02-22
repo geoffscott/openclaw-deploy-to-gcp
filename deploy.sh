@@ -564,7 +564,7 @@ if gcloud compute instances describe "${INSTANCE_NAME}" \
       gcloud compute instances set-service-account "${INSTANCE_NAME}" \
         --zone="${ZONE}" --project="${PROJECT_ID}" \
         --service-account="${VM_SA_EMAIL}" \
-        --scopes="https://www.googleapis.com/auth/secretmanager,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write"
+        --scopes="https://www.googleapis.com/auth/cloud-platform"
       gcloud compute instances start "${INSTANCE_NAME}" \
         --zone="${ZONE}" --project="${PROJECT_ID}" --quiet
       echo "  ✓ Service account attached and VM restarted"
@@ -575,7 +575,7 @@ else
   SA_FLAGS=()
   if [[ "${SM_READY}" == "true" ]]; then
     SA_FLAGS+=(--service-account="${VM_SA_EMAIL}")
-    SA_FLAGS+=(--scopes="https://www.googleapis.com/auth/secretmanager,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write")
+    SA_FLAGS+=(--scopes="https://www.googleapis.com/auth/cloud-platform")
     echo "  Using service account: ${VM_SA_EMAIL}"
   else
     SA_FLAGS+=(--no-service-account)
