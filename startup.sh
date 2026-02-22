@@ -249,6 +249,13 @@ if [ -f "${SENTINEL_FILE}" ]; then
       sed -i '/^Wants=network-online.target$/a StartLimitIntervalSec=300\nStartLimitBurst=5' "${UNIT_FILE}"
       NEEDS_RELOAD=true
     fi
+
+    # Fix Restart policy: on-failure misses clean exits from supervisor restarts
+    if grep -q 'Restart=on-failure' "${UNIT_FILE}"; then
+      log "Updating service unit: changing Restart=on-failure to Restart=always."
+      sed -i 's|Restart=on-failure|Restart=always|' "${UNIT_FILE}"
+      NEEDS_RELOAD=true
+    fi
   fi
 
   if [ "${NEEDS_RELOAD}" = true ]; then
@@ -313,7 +320,7 @@ ExecStartPre=+/usr/local/bin/fetch-openclaw-secrets
 EnvironmentFile=-${SECRETS_ENV}
 
 ExecStart=/bin/sh -c 'exec ${OPENCLAW_BIN} gateway --port 18789 --verbose --allow-unconfigured \${OPENCLAW_GATEWAY_TOKEN:+--token "\${OPENCLAW_GATEWAY_TOKEN}"}'
-Restart=on-failure
+Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
 
