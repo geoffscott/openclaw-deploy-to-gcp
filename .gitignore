@@ -1,6 +1,9 @@
-# Service account keys (the most common accidental commit)
-*.json
-!.claude/settings.json
+# Service account keys — target specific SA key filenames rather than all JSON
+key.json
+*-key.json
+*_key.json
+credentials.json
+client_secret*.json
 
 # Environment / secret files
 .env
