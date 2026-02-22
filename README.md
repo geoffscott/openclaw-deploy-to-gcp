@@ -42,8 +42,9 @@ APIs enabled automatically: `compute.googleapis.com`, `iap.googleapis.com`, `sec
 
 ## Prerequisites
 
-- A **dedicated GCP project** with [billing enabled](https://cloud.google.com/billing/docs/how-to/manage-billing-account) — the VM loads *every* secret in the project as an environment variable, so this project should not be shared with other workloads
-- Owner or Editor role on the project (to enable APIs and create resources)
+- **gcloud CLI authenticated** — run `gcloud auth list` to verify you have an active account. If not, run `gcloud auth login`. Cloud Shell is usually pre-authenticated, but sessions opened via the "Open in Cloud Shell" button may require explicit login.
+- A **dedicated GCP project** with [billing enabled](https://cloud.google.com/billing/docs/how-to/manage-billing-account) — the VM loads *every* secret in the project as an environment variable, so this project should not be shared with other workloads. On a new project, billing must be linked before APIs can be enabled.
+- **Owner or Editor role** on the project (to enable APIs and create resources)
 
 ---
 
