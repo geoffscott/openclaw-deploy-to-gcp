@@ -305,7 +305,7 @@ if [ -f "${SENTINEL_FILE}" ]; then
     fi
 
     # Add external DNS readiness check (Cloud NAT can be slow after VM reset)
-    if ! grep -q 'registry.npmjs.org' "${UNIT_FILE}"; then
+    if ! grep -q 'wait-for-external-dns' "${UNIT_FILE}"; then
       log "Service unit is missing external DNS readiness check — re-provisioning."
       rm -f "${SENTINEL_FILE}"
       exec "$0"
@@ -429,6 +429,20 @@ echo 'd /run/openclaw 0700 openclaw openclaw' > /etc/tmpfiles.d/openclaw.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/openclaw.conf 2>/dev/null || true
 log "Created /etc/tmpfiles.d/openclaw.conf for /run/openclaw"
 
+# ─── 4b. Install DNS readiness check script ──────────────────────────────
+# Cloud NAT can take 2+ minutes after a VM reset to establish outbound
+# connectivity. Google-owned domains resolve locally via the metadata
+# server, so we test a non-Google domain to confirm Cloud NAT is up.
+cat > /usr/local/bin/wait-for-external-dns <<'DNSSCRIPT'
+#!/bin/bash
+for i in $(seq 1 30); do
+  getent hosts registry.npmjs.org >/dev/null 2>&1 && exit 0
+  sleep 2
+done
+echo "External DNS not ready after 60s, starting anyway"
+DNSSCRIPT
+chmod 755 /usr/local/bin/wait-for-external-dns
+
 # ─── 5. Create systemd service ─────────────────────────────────────────────
 log "Creating systemd service…"
 cat > /etc/systemd/system/openclaw-gateway.service <<UNIT
@@ -448,10 +462,8 @@ WorkingDirectory=${OPENCLAW_HOME}
 # Fetch fresh secrets from Secret Manager before each start
 ExecStartPre=+/usr/local/bin/fetch-openclaw-secrets
 
-# Wait for external (non-Google) DNS to be ready — Cloud NAT can take 2+ min
-# after a VM reset. Google-owned domains resolve locally via the metadata
-# server, so we must test a non-Google domain to confirm Cloud NAT is up.
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do getent hosts registry.npmjs.org >/dev/null 2>&1 && exit 0; sleep 2; done; echo "External DNS not ready after 60s, starting anyway"'
+# Wait for external DNS to be ready (Cloud NAT can be slow after a VM reset)
+ExecStartPre=/usr/local/bin/wait-for-external-dns
 
 # Load secrets from tmpfs (- prefix: don't fail if file is missing)
 EnvironmentFile=-${SECRETS_ENV}
@@ -508,6 +520,7 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
+sleep 1
 systemctl enable openclaw-gateway.service
 systemctl start openclaw-gateway.service
 
