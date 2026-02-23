@@ -290,6 +290,13 @@ if [ -f "${SENTINEL_FILE}" ]; then
       sed -i 's|Restart=on-failure|Restart=always|' "${UNIT_FILE}"
       NEEDS_RELOAD=true
     fi
+
+    # Add AF_NETLINK to address families (required by os.networkInterfaces → getifaddrs)
+    if ! grep -q 'AF_NETLINK' "${UNIT_FILE}"; then
+      log "Updating service unit: adding AF_NETLINK to RestrictAddressFamilies."
+      sed -i 's|RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX|RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK|' "${UNIT_FILE}"
+      NEEDS_RELOAD=true
+    fi
   fi
 
   if [ "${NEEDS_RELOAD}" = true ]; then
@@ -425,7 +432,7 @@ EnvironmentFile=-${SECRETS_ENV}
 
 ExecStart=/bin/sh -c 'exec ${OPENCLAW_BIN} gateway --port 18789 --verbose --allow-unconfigured \${OPENCLAW_GATEWAY_TOKEN:+--token "\${OPENCLAW_GATEWAY_TOKEN}"}'
 Restart=always
-RestartSec=5
+RestartSec=10
 Environment=NODE_ENV=production
 
 # Prevent OpenClaw from writing secrets to persistent disk
@@ -448,8 +455,8 @@ ProtectHostname=true
 PrivateDevices=true
 DevicePolicy=closed
 
-# Network — only IPv4/IPv6/Unix (no raw, netlink, etc.)
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Network — IPv4/IPv6/Unix plus netlink (needed by os.networkInterfaces())
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
 # Capabilities — drop everything
 CapabilityBoundingSet=
