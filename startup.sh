@@ -153,6 +153,47 @@ protect_credential_paths() {
   chown -R "${OPENCLAW_USER}:${OPENCLAW_USER}" "${state_dir}"
 }
 
+# ─── Ensure gateway.mode=local in the OpenClaw config ─────────────────────────
+# The gateway refuses to start unless gateway.mode=local is set in the config
+# (error: "Gateway start blocked: set gateway.mode=local"). The
+# --allow-unconfigured flag is for ad-hoc/dev use only, so we write the config
+# explicitly.
+ensure_gateway_config() {
+  local config_dir="${OPENCLAW_HOME}/.openclaw"
+  local config_file="${config_dir}/openclaw.json"
+
+  mkdir -p "${config_dir}"
+
+  if [ -f "${config_file}" ]; then
+    # Check if gateway.mode is already set to local
+    if command -v jq &>/dev/null; then
+      local current_mode
+      current_mode="$(jq -r '.gateway.mode // empty' "${config_file}" 2>/dev/null)" || true
+      if [ "${current_mode}" = "local" ]; then
+        return 0
+      fi
+      # Merge gateway.mode into existing config
+      local tmp="${config_file}.tmp"
+      if jq '.gateway.mode = "local"' "${config_file}" > "${tmp}" 2>/dev/null; then
+        mv "${tmp}" "${config_file}"
+        chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${config_file}"
+        chmod 600 "${config_file}"
+        log "Set gateway.mode=local in existing config"
+        return 0
+      fi
+      rm -f "${tmp}"
+    fi
+    # jq unavailable or failed — leave existing config, rely on --allow-unconfigured
+    return 0
+  fi
+
+  # No config file — create minimal one
+  printf '%s\n' '{"gateway":{"mode":"local"}}' > "${config_file}"
+  chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${config_file}"
+  chmod 600 "${config_file}"
+  log "Created gateway config with gateway.mode=local"
+}
+
 # ─── Install the secret-fetch script (for systemd ExecStartPre) ─────────────
 install_fetch_script() {
   cat > /usr/local/bin/fetch-openclaw-secrets <<'FETCHSCRIPT'
@@ -250,6 +291,7 @@ if [ -f "${SENTINEL_FILE}" ]; then
 
   # Always update the fetch-secrets helper so fixes propagate on reboot
   install_fetch_script
+  ensure_gateway_config
 
   # Self-repair: detect outdated unit files and patch or re-provision
   UNIT_FILE="/etc/systemd/system/openclaw-gateway.service"
@@ -385,6 +427,9 @@ log "openclaw binary: ${OPENCLAW_BIN}"
 # ─── 3. Install the fetch-secrets helper ─────────────────────────────────────
 install_fetch_script
 log "Installed /usr/local/bin/fetch-openclaw-secrets"
+
+# ─── 3b. Set gateway.mode=local in OpenClaw config ───────────────────────────
+ensure_gateway_config
 
 # ─── 4. Create systemd service ──────────────────────────────────────────────
 log "Creating systemd service…"
