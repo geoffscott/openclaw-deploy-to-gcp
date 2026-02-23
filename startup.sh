@@ -248,6 +248,12 @@ restrict_metadata_access
 if [ -f "${SENTINEL_FILE}" ]; then
   log "Already provisioned. Ensuring service is running."
 
+  # Ensure /run/openclaw exists (tmpfs is lost on reboot)
+  if [ ! -f /etc/tmpfiles.d/openclaw.conf ]; then
+    echo 'd /run/openclaw 0700 openclaw openclaw' > /etc/tmpfiles.d/openclaw.conf
+  fi
+  systemd-tmpfiles --create /etc/tmpfiles.d/openclaw.conf 2>/dev/null || true
+
   # Always update the fetch-secrets helper so fixes propagate on reboot
   install_fetch_script
 
@@ -296,6 +302,13 @@ if [ -f "${SENTINEL_FILE}" ]; then
       log "Updating service unit: adding AF_NETLINK to RestrictAddressFamilies."
       sed -i 's|RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX|RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK|' "${UNIT_FILE}"
       NEEDS_RELOAD=true
+    fi
+
+    # Add DNS readiness check (Cloud NAT can be slow after VM reset)
+    if ! grep -q 'dns.google' "${UNIT_FILE}"; then
+      log "Service unit is missing DNS readiness check — re-provisioning."
+      rm -f "${SENTINEL_FILE}"
+      exec "$0"
     fi
   fi
 
@@ -408,15 +421,23 @@ log "openclaw binary: ${OPENCLAW_BIN}"
 install_fetch_script
 log "Installed /usr/local/bin/fetch-openclaw-secrets"
 
-# ─── 4. Create systemd service ──────────────────────────────────────────────
+# ─── 4. Ensure /run/openclaw exists on every boot ─────────────────────────
+# The systemd unit's ReadWritePaths=/run/openclaw requires the directory to
+# exist before the service starts. Using tmpfiles.d guarantees it exists
+# before any service starts (runs during early boot, well before multi-user).
+echo 'd /run/openclaw 0700 openclaw openclaw' > /etc/tmpfiles.d/openclaw.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/openclaw.conf 2>/dev/null || true
+log "Created /etc/tmpfiles.d/openclaw.conf for /run/openclaw"
+
+# ─── 5. Create systemd service ─────────────────────────────────────────────
 log "Creating systemd service…"
 cat > /etc/systemd/system/openclaw-gateway.service <<UNIT
 [Unit]
 Description=OpenClaw Gateway
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=300
-StartLimitBurst=5
+StartLimitIntervalSec=600
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -427,12 +448,15 @@ WorkingDirectory=${OPENCLAW_HOME}
 # Fetch fresh secrets from Secret Manager before each start
 ExecStartPre=+/usr/local/bin/fetch-openclaw-secrets
 
+# Wait for external DNS to be ready (Cloud NAT can be slow after a VM reset)
+ExecStartPre=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do getent hosts dns.google >/dev/null 2>&1 && exit 0; sleep 2; done; echo "DNS not ready after 30s, starting anyway"'
+
 # Load secrets from tmpfs (- prefix: don't fail if file is missing)
 EnvironmentFile=-${SECRETS_ENV}
 
 ExecStart=/bin/sh -c 'exec ${OPENCLAW_BIN} gateway --port 18789 --verbose --allow-unconfigured \${OPENCLAW_GATEWAY_TOKEN:+--token "\${OPENCLAW_GATEWAY_TOKEN}"}'
 Restart=always
-RestartSec=10
+RestartSec=15
 Environment=NODE_ENV=production
 
 # Prevent OpenClaw from writing secrets to persistent disk
@@ -485,7 +509,7 @@ systemctl daemon-reload
 systemctl enable openclaw-gateway.service
 systemctl start openclaw-gateway.service
 
-# ─── 5. Mark as provisioned ─────────────────────────────────────────────────
+# ─── 6. Mark as provisioned ─────────────────────────────────────────────────
 mkdir -p /var/lib/openclaw
 touch "${SENTINEL_FILE}"
 
