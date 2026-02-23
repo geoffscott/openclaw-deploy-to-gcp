@@ -304,9 +304,9 @@ if [ -f "${SENTINEL_FILE}" ]; then
       NEEDS_RELOAD=true
     fi
 
-    # Add DNS readiness check (Cloud NAT can be slow after VM reset)
-    if ! grep -q 'dns.google' "${UNIT_FILE}"; then
-      log "Service unit is missing DNS readiness check — re-provisioning."
+    # Add external DNS readiness check (Cloud NAT can be slow after VM reset)
+    if ! grep -q 'registry.npmjs.org' "${UNIT_FILE}"; then
+      log "Service unit is missing external DNS readiness check — re-provisioning."
       rm -f "${SENTINEL_FILE}"
       exec "$0"
     fi
@@ -448,8 +448,10 @@ WorkingDirectory=${OPENCLAW_HOME}
 # Fetch fresh secrets from Secret Manager before each start
 ExecStartPre=+/usr/local/bin/fetch-openclaw-secrets
 
-# Wait for external DNS to be ready (Cloud NAT can be slow after a VM reset)
-ExecStartPre=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do getent hosts dns.google >/dev/null 2>&1 && exit 0; sleep 2; done; echo "DNS not ready after 30s, starting anyway"'
+# Wait for external (non-Google) DNS to be ready — Cloud NAT can take 2+ min
+# after a VM reset. Google-owned domains resolve locally via the metadata
+# server, so we must test a non-Google domain to confirm Cloud NAT is up.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do getent hosts registry.npmjs.org >/dev/null 2>&1 && exit 0; sleep 2; done; echo "External DNS not ready after 60s, starting anyway"'
 
 # Load secrets from tmpfs (- prefix: don't fail if file is missing)
 EnvironmentFile=-${SECRETS_ENV}
