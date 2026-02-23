@@ -2,6 +2,8 @@
 
 This tutorial walks you through deploying a secure virtual machine with [OpenClaw](https://openclaw.ai/) pre-installed. The VM is **only reachable through Google's [Identity-Aware Proxy (IAP)](https://cloud.google.com/iap)** — no public IP, no open SSH port on the internet. Secrets are stored in Secret Manager and never written to persistent disk.
 
+> Commands in this tutorial are labelled **"Run in Cloud Shell"** or **"Run on the VM"** so you always know where to type them.
+
 ---
 
 ## Step 1 — Prerequisites
@@ -11,6 +13,8 @@ Before deploying, make sure your Cloud Shell session is authenticated, your proj
 ### Authenticate
 
 Cloud Shell is usually pre-authenticated, but sessions opened via a repo link may not be. Verify you have an active account:
+
+**Run in Cloud Shell:**
 
 ```bash
 gcloud auth list
@@ -25,6 +29,8 @@ gcloud auth login
 ### Select your project
 
 Set the project you want to deploy into:
+
+**Run in Cloud Shell:**
 
 ```bash
 gcloud config set project <YOUR_PROJECT_ID>
@@ -67,7 +73,7 @@ Key actions performed by the script:
 
 ## Step 3 — Run the deploy script
 
-Run the deployment with default settings:
+**Run in Cloud Shell:**
 
 ```bash
 bash deploy.sh
@@ -96,6 +102,8 @@ The script is **idempotent** — safe to run multiple times.
 
 The deploy script pre-created all secrets with placeholder values. You just need to update the required one — your Anthropic API key:
 
+**Run in Cloud Shell:**
+
 ```bash
 gcloud secrets versions add ANTHROPIC_API_KEY --data-file=- <<< 'sk-ant-...'
 ```
@@ -104,11 +112,13 @@ Or open [Secret Manager](https://console.cloud.google.com/security/secret-manage
 
 > **Gateway token:** `OPENCLAW_GATEWAY_TOKEN` was auto-generated during deployment. If you want to run the full interactive setup wizard instead, SSH in and run `sudo -u openclaw openclaw setup`, then update the secret with the token it prints.
 
-Then restart the service to load the real key:
+Then restart the VM to load the real key (secrets are re-fetched automatically on boot):
+
+**Run in Cloud Shell:**
 
 ```bash
-gcloud compute ssh iap-vps --zone=us-central1-a --tunnel-through-iap \
-  -- sudo systemctl restart openclaw-gateway
+gcloud compute instances stop iap-vps --zone=us-central1-a --quiet
+gcloud compute instances start iap-vps --zone=us-central1-a --quiet
 ```
 
 ---
@@ -116,6 +126,8 @@ gcloud compute ssh iap-vps --zone=us-central1-a --tunnel-through-iap \
 ## Step 5 — Connect to your VPS
 
 Once deployment finishes, SSH into the instance through IAP:
+
+**Run in Cloud Shell:**
 
 ```bash
 gcloud compute ssh iap-vps \
@@ -127,11 +139,15 @@ Replace `iap-vps` and `us-central1-a` with your chosen instance name and zone if
 
 > **How it works:** gcloud opens an encrypted tunnel to Google's IAP service, which authenticates your identity before forwarding traffic to the VM. The VM never exposes port 22 to the public internet.
 
+> **First-time SSH:** If gcloud prompts to create an SSH key, press **Y** and accept the defaults — this is a one-time setup.
+
 ---
 
 ## Step 6 — Verify OpenClaw
 
-OpenClaw is installed automatically on first boot (takes 2-3 minutes). Check the service status:
+OpenClaw is installed automatically on first boot (takes 2-3 minutes). These commands assume you're already connected via SSH from Step 5.
+
+**Run on the VM:**
 
 ```bash
 sudo systemctl status openclaw-gateway
@@ -153,7 +169,9 @@ sudo systemctl restart openclaw-gateway
 
 ## Step 7 — Access the Web UI
 
-The OpenClaw gateway runs on `localhost:18789` inside the VM. To open it in your browser, forward the port through the IAP tunnel:
+The OpenClaw gateway runs on `localhost:18789` inside the VM. To open it in your browser, forward the port through the IAP tunnel.
+
+**Run in Cloud Shell** (open a new terminal tab):
 
 ```bash
 gcloud compute ssh iap-vps \
@@ -172,6 +190,8 @@ Then open [http://localhost:18789](http://localhost:18789) in your browser. The 
 
 Confirm the instance has no external IP:
 
+**Run in Cloud Shell:**
+
 ```bash
 gcloud compute instances describe iap-vps \
   --zone=us-central1-a \
@@ -185,6 +205,8 @@ The output should be empty — no `natIP` means no public address.
 ## Cleanup
 
 To tear down all resources created by this deployment:
+
+**Run in Cloud Shell:**
 
 ```bash
 # Delete the VM
