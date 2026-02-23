@@ -72,46 +72,44 @@ enumerates all secrets at startup and writes them to `/run/openclaw/env`
 (tmpfs — RAM only, never on disk). This project should be dedicated to
 this deployment.
 
-`deploy.sh` automatically creates all secrets with placeholder values.
-You only need to fill in the ones you want to use.
+`deploy.sh` pre-creates all secrets (empty — no initial version). Set
+their values through the **GCP Console → Secret Manager** UI.
 
 ### Pre-created secrets
 
-| Secret | Category | Default |
-|--------|----------|---------|
-| `ANTHROPIC_API_KEY` | **Required** | `REPLACE_ME` |
-| `OPENAI_API_KEY` | Provider | `DISABLED` |
-| `OPENROUTER_API_KEY` | Provider | `DISABLED` |
-| `GEMINI_API_KEY` | Provider | `DISABLED` |
-| `XAI_API_KEY` | Provider | `DISABLED` |
-| `GROQ_API_KEY` | Provider | `DISABLED` |
-| `MISTRAL_API_KEY` | Provider | `DISABLED` |
-| `DEEPGRAM_API_KEY` | Provider | `DISABLED` |
-| `TELEGRAM_BOT_TOKEN` | Channel | `DISABLED` |
-| `DISCORD_BOT_TOKEN` | Channel | `DISABLED` |
-| `SLACK_BOT_TOKEN` | Channel | `DISABLED` |
-| `SLACK_APP_TOKEN` | Channel | `DISABLED` |
-| `OPENCLAW_GATEWAY_TOKEN` | Gateway | Auto-generated (hex) |
-| `OPENCLAW_PRIMARY_MODEL` | Gateway | `claude-sonnet-4-20250514` |
+| Secret | Category |
+|--------|----------|
+| `ANTHROPIC_API_KEY` | **Required** |
+| `OPENAI_API_KEY` | Provider |
+| `OPENROUTER_API_KEY` | Provider |
+| `GEMINI_API_KEY` | Provider |
+| `XAI_API_KEY` | Provider |
+| `GROQ_API_KEY` | Provider |
+| `MISTRAL_API_KEY` | Provider |
+| `DEEPGRAM_API_KEY` | Provider |
+| `TELEGRAM_BOT_TOKEN` | Channel |
+| `DISCORD_BOT_TOKEN` | Channel |
+| `SLACK_BOT_TOKEN` | Channel |
+| `SLACK_APP_TOKEN` | Channel |
+| `OPENCLAW_GATEWAY_TOKEN` | Gateway |
+| `OPENCLAW_PRIMARY_MODEL` | Gateway |
 
-Secrets left as `DISABLED` are ignored by OpenClaw.
+Secrets without a version are ignored. Only set the ones you need.
 
-```bash
-# Update a required secret
-gcloud secrets versions add ANTHROPIC_API_KEY \
-  --project="${GCP_PROJECT_ID}" \
-  --data-file=- <<< 'sk-ant-api03-...'
+### Setting secrets (GCP Console)
 
-# Enable a channel
-gcloud secrets versions add TELEGRAM_BOT_TOKEN \
-  --project="${GCP_PROJECT_ID}" \
-  --data-file=- <<< '123456:ABC-...'
+1. Open **Secret Manager** in the GCP Console:
+   `https://console.cloud.google.com/security/secret-manager?project=YOUR_PROJECT_ID`
+2. Click a secret name (e.g. `ANTHROPIC_API_KEY`)
+3. Click **+ New Version**, paste the value, and save
 
-# Restart service to pick up new secrets
-gcloud compute ssh iap-vps --zone=us-central1-a \
-  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
-  -- sudo systemctl restart openclaw-gateway
-```
+### Restarting to pick up new secrets
+
+After updating secrets, **reset the VM** so it re-fetches them on boot:
+
+- **GCP Console**: Compute Engine → VM instances → `iap-vps` → **Reset**
+  `https://console.cloud.google.com/compute/instances?project=YOUR_PROJECT_ID`
+- **CLI**: `gcloud compute instances reset iap-vps --zone=us-central1-a --project="${GCP_PROJECT_ID}"`
 
 ### Credential isolation on the VM
 
@@ -126,7 +124,7 @@ gcloud compute ssh iap-vps --zone=us-central1-a \
 | Layer | Mechanism |
 |-------|-----------|
 | Metadata server | iptables blocks `openclaw` user from `169.254.169.254` (prevents token theft) |
-| OAuth scopes | `cloud-platform` (required by Secret Manager; access limited by SA's IAM roles to secrets + logging + monitoring only) |
+| OAuth scopes | `cloud-platform` (access limited by SA's IAM roles: secrets, logging, monitoring) |
 | Systemd sandbox | `ProtectSystem=strict`, `NoNewPrivileges`, `CapabilityBoundingSet=` (empty), syscall filtering |
 | Network | Port 18789 denied at firewall; SSH only via IAP (priority 500) |
 | OS patching | `unattended-upgrades` with automatic reboot at 04:00 |

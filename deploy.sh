@@ -274,12 +274,12 @@ if gcloud services list --project="${PROJECT_ID}" --filter="name:secretmanager.g
     }
   fi
 
-  # Grant secretmanager.secretAccessor (read values) and secretmanager.viewer
-  # (list secrets) to the VM service account
+  # Grant the VM service account access to secrets, logging, and monitoring
   if gcloud iam service-accounts describe "${VM_SA_EMAIL}" \
        --project="${PROJECT_ID}" &>/dev/null; then
     BIND_ERR=""
-    for SM_ROLE in roles/secretmanager.secretAccessor roles/secretmanager.viewer; do
+    for SM_ROLE in roles/secretmanager.secretAccessor roles/secretmanager.viewer \
+                   roles/logging.logWriter roles/monitoring.metricWriter; do
       BIND_ERR="$(gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
         --member="serviceAccount:${VM_SA_EMAIL}" \
         --role="${SM_ROLE}" \
@@ -316,44 +316,40 @@ else
   echo "  ⚠  Secret Manager API not enabled — skipping."
 fi
 
-# ─── Pre-create OpenClaw secrets (placeholder values) ─────────────────────
-# Creates secrets that don't exist yet so the user only needs to fill in values.
-# Required secrets get a "REPLACE_ME" placeholder; optional ones get "DISABLED".
+# ─── Pre-create OpenClaw secrets (empty — user sets values via Console) ────
+# Creates secrets that don't exist yet. No initial version is added so the
+# user fills in values through the GCP Console's Secret Manager UI.
 if [[ "${SM_READY}" == "true" ]]; then
   echo ""
-  echo "▶ Pre-creating OpenClaw secrets (placeholders for unconfigured ones)…"
+  echo "▶ Pre-creating OpenClaw secrets (no values — set them in the Console)…"
 
-  # Auto-generate a gateway token for API auth
-  GENERATED_GW_TOKEN="$(openssl rand -hex 32)"
-
-  # Format: "SECRET_NAME|PLACEHOLDER|CATEGORY"
-  # Categories: required, provider, channel, gateway
+  # Format: "SECRET_NAME|CATEGORY"
   OPENCLAW_SECRETS=(
     # ── Required ──────────────────────────────────────────────────────────
-    "ANTHROPIC_API_KEY|REPLACE_ME|required"
+    "ANTHROPIC_API_KEY|required"
 
     # ── Optional AI providers ─────────────────────────────────────────────
-    "OPENAI_API_KEY|DISABLED|provider"
-    "OPENROUTER_API_KEY|DISABLED|provider"
-    "GEMINI_API_KEY|DISABLED|provider"
-    "XAI_API_KEY|DISABLED|provider"
-    "GROQ_API_KEY|DISABLED|provider"
-    "MISTRAL_API_KEY|DISABLED|provider"
-    "DEEPGRAM_API_KEY|DISABLED|provider"
+    "OPENAI_API_KEY|provider"
+    "OPENROUTER_API_KEY|provider"
+    "GEMINI_API_KEY|provider"
+    "XAI_API_KEY|provider"
+    "GROQ_API_KEY|provider"
+    "MISTRAL_API_KEY|provider"
+    "DEEPGRAM_API_KEY|provider"
 
     # ── Channel: Telegram ─────────────────────────────────────────────────
-    "TELEGRAM_BOT_TOKEN|DISABLED|channel"
+    "TELEGRAM_BOT_TOKEN|channel"
 
     # ── Channel: Discord ──────────────────────────────────────────────────
-    "DISCORD_BOT_TOKEN|DISABLED|channel"
+    "DISCORD_BOT_TOKEN|channel"
 
     # ── Channel: Slack ────────────────────────────────────────────────────
-    "SLACK_BOT_TOKEN|DISABLED|channel"
-    "SLACK_APP_TOKEN|DISABLED|channel"
+    "SLACK_BOT_TOKEN|channel"
+    "SLACK_APP_TOKEN|channel"
 
     # ── Gateway / auth ────────────────────────────────────────────────────
-    "OPENCLAW_GATEWAY_TOKEN|${GENERATED_GW_TOKEN}|gateway"
-    "OPENCLAW_PRIMARY_MODEL|claude-sonnet-4-20250514|gateway"
+    "OPENCLAW_GATEWAY_TOKEN|gateway"
+    "OPENCLAW_PRIMARY_MODEL|gateway"
   )
 
   CREATED=0
@@ -361,19 +357,14 @@ if [[ "${SM_READY}" == "true" ]]; then
 
   for ENTRY in "${OPENCLAW_SECRETS[@]}"; do
     SECRET_NAME="${ENTRY%%|*}"
-    REST="${ENTRY#*|}"
-    PLACEHOLDER="${REST%%|*}"
-    CATEGORY="${REST#*|}"
 
     if gcloud secrets describe "${SECRET_NAME}" \
          --project="${PROJECT_ID}" &>/dev/null; then
       EXISTING=$((EXISTING + 1))
     else
-      printf '%s' "${PLACEHOLDER}" \
-        | gcloud secrets create "${SECRET_NAME}" \
-            --project="${PROJECT_ID}" \
-            --data-file=- \
-            --quiet 2>/dev/null && {
+      gcloud secrets create "${SECRET_NAME}" \
+        --project="${PROJECT_ID}" \
+        --quiet 2>/dev/null && {
         CREATED=$((CREATED + 1))
       } || {
         echo "  ✗ Could not create secret ${SECRET_NAME}"
@@ -383,18 +374,20 @@ if [[ "${SM_READY}" == "true" ]]; then
 
   echo "  ✓ Secrets: ${CREATED} created, ${EXISTING} already existed"
 
-  # Show which required secrets still need real values
+  # Check which required secrets still need a value (no versions at all,
+  # or still set to legacy REPLACE_ME placeholder)
   NEEDS_UPDATE=()
   for ENTRY in "${OPENCLAW_SECRETS[@]}"; do
     SECRET_NAME="${ENTRY%%|*}"
-    REST="${ENTRY#*|}"
-    PLACEHOLDER="${REST%%|*}"
-    CATEGORY="${REST#*|}"
+    CATEGORY="${ENTRY#*|}"
 
     if [[ "${CATEGORY}" == "required" ]]; then
       CURRENT_VALUE="$(gcloud secrets versions access latest \
-        --secret="${SECRET_NAME}" --project="${PROJECT_ID}" 2>/dev/null)" || continue
-      if [[ "${CURRENT_VALUE}" == "REPLACE_ME" ]]; then
+        --secret="${SECRET_NAME}" --project="${PROJECT_ID}" 2>/dev/null)" || {
+        NEEDS_UPDATE+=("${SECRET_NAME}")
+        continue
+      }
+      if [[ "${CURRENT_VALUE}" == "REPLACE_ME" || -z "${CURRENT_VALUE}" ]]; then
         NEEDS_UPDATE+=("${SECRET_NAME}")
       fi
     fi
@@ -407,8 +400,8 @@ if [[ "${SM_READY}" == "true" ]]; then
       echo "      • ${S}"
     done
     echo ""
-    echo "    Update with:"
-    echo "      gcloud secrets versions add SECRET_NAME --project=${PROJECT_ID} --data-file=- <<< 'real-value'"
+    echo "    Set them in the GCP Console → Secret Manager:"
+    echo "      https://console.cloud.google.com/security/secret-manager?project=${PROJECT_ID}"
   fi
 fi
 
@@ -738,35 +731,28 @@ echo "  The tunnel stays open as long as the SSH session is active."
 echo ""
 echo "  ── Secrets Management ──────────────────────────────────"
 echo ""
-echo "  Secrets are pre-created with placeholder values."
-echo "  Update the required one(s) with real values:"
+echo "  Secrets are pre-created but empty. Add values via"
+echo "  the GCP Console → Secret Manager:"
 echo ""
-echo "    gcloud secrets versions add ANTHROPIC_API_KEY \\"
-echo "      --project=${PROJECT_ID} \\"
-echo "      --data-file=- <<< 'sk-ant-api03-...'"
+echo "    https://console.cloud.google.com/security/secret-manager?project=${PROJECT_ID}"
 echo ""
-echo "  Optional — enable channels by updating their tokens:"
+echo "  At minimum, set ANTHROPIC_API_KEY to your API key."
+echo "  Optional: set channel tokens (TELEGRAM_BOT_TOKEN, etc.)"
+echo "  to enable messaging channels."
 echo ""
-echo "    gcloud secrets versions add TELEGRAM_BOT_TOKEN \\"
-echo "      --project=${PROJECT_ID} --data-file=- <<< 'bot-token'"
+echo "  ── Restarting to pick up new secrets ─────────────────"
 echo ""
-echo "    gcloud secrets versions add DISCORD_BOT_TOKEN \\"
-echo "      --project=${PROJECT_ID} --data-file=- <<< 'bot-token'"
+echo "  After updating secrets, restart the VM from the Console:"
 echo ""
-echo "    gcloud secrets versions add SLACK_BOT_TOKEN \\"
-echo "      --project=${PROJECT_ID} --data-file=- <<< 'xoxb-...'"
-echo "    gcloud secrets versions add SLACK_APP_TOKEN \\"
-echo "      --project=${PROJECT_ID} --data-file=- <<< 'xapp-...'"
+echo "    Compute Engine → VM instances → ${INSTANCE_NAME} → Reset"
 echo ""
-echo "  List all secrets:  gcloud secrets list --project=${PROJECT_ID}"
+echo "    https://console.cloud.google.com/compute/instances?project=${PROJECT_ID}"
 echo ""
-echo "  After updating secrets, restart the service:"
+echo "  Or from the CLI:"
 echo ""
-echo "    gcloud compute ssh ${INSTANCE_NAME} --tunnel-through-iap \\"
-echo "      --project=${PROJECT_ID} --zone=${ZONE} \\"
-echo "      -- sudo systemctl restart openclaw-gateway"
+echo "    gcloud compute instances reset ${INSTANCE_NAME} \\"
+echo "      --project=${PROJECT_ID} --zone=${ZONE}"
 echo ""
 echo "  ⚠  This project should be dedicated to this deployment."
 echo "     All secrets in the project are loaded into OpenClaw."
-echo "     Secrets set to \"DISABLED\" are ignored by OpenClaw."
 echo "════════════════════════════════════════════════════════════"

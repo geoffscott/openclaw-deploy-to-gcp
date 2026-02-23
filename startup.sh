@@ -348,7 +348,8 @@ fi
 if ! systemctl is-active --quiet google-cloud-ops-agent 2>/dev/null; then
   log "Installing Google Cloud Ops Agent…"
   curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
-  bash add-google-cloud-ops-agent-repo.sh --also-install
+  bash add-google-cloud-ops-agent-repo.sh --also-install \
+    || log "WARNING: Ops Agent install script returned non-zero (agent may already be installed)"
   rm -f add-google-cloud-ops-agent-repo.sh
 
   mkdir -p /etc/google-cloud-ops-agent
@@ -375,8 +376,22 @@ fi
 
 # ─── 2. Install OpenClaw globally ───────────────────────────────────────────
 if ! command -v openclaw &>/dev/null; then
-  log "Installing openclaw…"
-  npm install -g openclaw@latest
+  log "Installing openclaw (77 MB — may take a few minutes)…"
+  local_attempt=0
+  local_max=3
+  while [[ ${local_attempt} -lt ${local_max} ]]; do
+    local_attempt=$((local_attempt + 1))
+    if npm install -g openclaw@latest 2>&1; then
+      break
+    fi
+    if [[ ${local_attempt} -lt ${local_max} ]]; then
+      log "npm install failed (attempt ${local_attempt}/${local_max}), retrying in $((local_attempt * 10))s…"
+      sleep $((local_attempt * 10))
+    else
+      log "ERROR: npm install failed after ${local_max} attempts"
+      exit 1
+    fi
+  done
 fi
 
 OPENCLAW_BIN="$(which openclaw)"
