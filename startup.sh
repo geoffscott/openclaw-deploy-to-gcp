@@ -357,8 +357,6 @@ logging:
   receivers:
     openclaw_journal:
       type: systemd_journald
-      units:
-        - openclaw-gateway
     syslog:
       type: files
       include_paths:
@@ -370,7 +368,8 @@ logging:
         receivers: [openclaw_journal, syslog]
 OPSCONFIG
 
-  systemctl restart google-cloud-ops-agent
+  systemctl restart google-cloud-ops-agent \
+    || log "WARNING: Cloud Ops Agent failed to start — will retry on next boot."
   log "  Cloud Ops Agent installed and configured"
 fi
 
