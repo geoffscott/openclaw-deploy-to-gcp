@@ -290,6 +290,13 @@ if [ -f "${SENTINEL_FILE}" ]; then
       sed -i 's|Restart=on-failure|Restart=always|' "${UNIT_FILE}"
       NEEDS_RELOAD=true
     fi
+
+    # Add AF_NETLINK to RestrictAddressFamilies (needed by os.networkInterfaces)
+    if grep -q 'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX$' "${UNIT_FILE}"; then
+      log "Updating service unit: adding AF_NETLINK to RestrictAddressFamilies."
+      sed -i 's|RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX$|RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK|' "${UNIT_FILE}"
+      NEEDS_RELOAD=true
+    fi
   fi
 
   if [ "${NEEDS_RELOAD}" = true ]; then
@@ -303,11 +310,13 @@ fi
 
 log "Starting OpenClaw provisioning…"
 
-# ─── 1. Install Node.js 22 from NodeSource ──────────────────────────────────
+# ─── 1. Install system dependencies and Node.js 22 ───────────────────────────
+# build-essential + libopus-dev are needed to compile @discordjs/opus (native module)
 if ! command -v node &>/dev/null || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt "${NODE_MAJOR}" ]; then
   log "Installing Node.js ${NODE_MAJOR}…"
   apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl gnupg git jq iptables-persistent
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl gnupg git jq iptables-persistent \
+    build-essential libopus-dev python3
   mkdir -p /etc/apt/keyrings
   curl -fsSL "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key" \
     | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
@@ -315,6 +324,13 @@ if ! command -v node &>/dev/null || [ "$(node --version | cut -d. -f1 | tr -d v)
     > /etc/apt/sources.list.d/nodesource.list
   apt-get update -qq
   apt-get install -y -qq nodejs
+else
+  # Node.js already installed — ensure native build deps are present
+  if ! command -v make &>/dev/null || ! dpkg -s libopus-dev &>/dev/null; then
+    log "Installing native build dependencies…"
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential libopus-dev python3
+  fi
 fi
 log "Node.js version: $(node --version)"
 
@@ -434,7 +450,7 @@ PrivateDevices=true
 DevicePolicy=closed
 
 # Network — only IPv4/IPv6/Unix (no raw, netlink, etc.)
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
 # Capabilities — drop everything
 CapabilityBoundingSet=
