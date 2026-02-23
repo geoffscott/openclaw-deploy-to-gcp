@@ -112,13 +112,13 @@ Or open [Secret Manager](https://console.cloud.google.com/security/secret-manage
 
 > **Gateway token:** `OPENCLAW_GATEWAY_TOKEN` was auto-generated during deployment. If you want to run the full interactive setup wizard instead, SSH in and run `sudo -u openclaw openclaw setup`, then update the secret with the token it prints.
 
-Then restart the service to load the real key (this runs the restart command on the VM remotely):
+Then restart the VM to load the real key (secrets are re-fetched automatically on boot):
 
 **Run in Cloud Shell:**
 
 ```bash
-gcloud compute ssh iap-vps --zone=us-central1-a --tunnel-through-iap \
-  -- sudo systemctl restart openclaw-gateway
+gcloud compute instances stop iap-vps --zone=us-central1-a --quiet
+gcloud compute instances start iap-vps --zone=us-central1-a --quiet
 ```
 
 ---
@@ -138,6 +138,8 @@ gcloud compute ssh iap-vps \
 Replace `iap-vps` and `us-central1-a` with your chosen instance name and zone if you used custom values.
 
 > **How it works:** gcloud opens an encrypted tunnel to Google's IAP service, which authenticates your identity before forwarding traffic to the VM. The VM never exposes port 22 to the public internet.
+
+> **First-time SSH:** If gcloud prompts to create an SSH key, press **Y** and accept the defaults — this is a one-time setup.
 
 ---
 
