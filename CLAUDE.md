@@ -72,29 +72,31 @@ enumerates all secrets at startup and writes them to `/run/openclaw/env`
 (tmpfs — RAM only, never on disk). This project should be dedicated to
 this deployment.
 
-`deploy.sh` automatically creates all secrets with placeholder values.
-You only need to fill in the ones you want to use.
+`deploy.sh` automatically creates all secrets. Required and gateway secrets get
+an initial version; optional provider and channel secrets are created as empty
+resources (no version). Add a version to activate an optional secret.
 
 ### Pre-created secrets
 
-| Secret | Category | Default |
-|--------|----------|---------|
+| Secret | Category | Initial value |
+|--------|----------|---------------|
 | `ANTHROPIC_API_KEY` | **Required** | `REPLACE_ME` |
-| `OPENAI_API_KEY` | Provider | `DISABLED` |
-| `OPENROUTER_API_KEY` | Provider | `DISABLED` |
-| `GEMINI_API_KEY` | Provider | `DISABLED` |
-| `XAI_API_KEY` | Provider | `DISABLED` |
-| `GROQ_API_KEY` | Provider | `DISABLED` |
-| `MISTRAL_API_KEY` | Provider | `DISABLED` |
-| `DEEPGRAM_API_KEY` | Provider | `DISABLED` |
-| `TELEGRAM_BOT_TOKEN` | Channel | `DISABLED` |
-| `DISCORD_BOT_TOKEN` | Channel | `DISABLED` |
-| `SLACK_BOT_TOKEN` | Channel | `DISABLED` |
-| `SLACK_APP_TOKEN` | Channel | `DISABLED` |
+| `OPENAI_API_KEY` | Provider | *(no version)* |
+| `OPENROUTER_API_KEY` | Provider | *(no version)* |
+| `GEMINI_API_KEY` | Provider | *(no version)* |
+| `XAI_API_KEY` | Provider | *(no version)* |
+| `GROQ_API_KEY` | Provider | *(no version)* |
+| `MISTRAL_API_KEY` | Provider | *(no version)* |
+| `DEEPGRAM_API_KEY` | Provider | *(no version)* |
+| `TELEGRAM_BOT_TOKEN` | Channel | *(no version)* |
+| `DISCORD_BOT_TOKEN` | Channel | *(no version)* |
+| `SLACK_BOT_TOKEN` | Channel | *(no version)* |
+| `SLACK_APP_TOKEN` | Channel | *(no version)* |
 | `OPENCLAW_GATEWAY_TOKEN` | Gateway | Auto-generated (hex) |
 | `OPENCLAW_PRIMARY_MODEL` | Gateway | `claude-sonnet-4-20250514` |
 
-Secrets left as `DISABLED` are ignored by OpenClaw.
+Secrets without versions are ignored until the user adds a value with
+`gcloud secrets versions add`.
 
 ```bash
 # Update a required secret

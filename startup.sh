@@ -142,6 +142,13 @@ protect_credential_paths() {
     log "Removed tmpfs bind-mount from ${cred_dir} (device tokens now persist)"
   fi
 
+  # Seed openclaw.json if it doesn't exist yet (needed by configure_channel_plugins)
+  local config_file="${state_dir}/openclaw.json"
+  if [[ ! -f "${config_file}" ]]; then
+    echo '{}' > "${config_file}"
+    log "Created empty ${config_file}"
+  fi
+
   # Prevent .env files from being written to persistent disk
   local dot_env="${state_dir}/.env"
   if [[ ! -L "${dot_env}" ]]; then
@@ -210,8 +217,86 @@ done <<< "${NAMES}"
 mv "${TMP}" "${SECRETS_ENV}"
 chown openclaw:openclaw "${SECRETS_ENV}"
 chmod 600 "${SECRETS_ENV}"
+
+# ── Auto-enable channel plugins based on fetched secrets ──────────────────
+CONFIG_FILE="/home/openclaw/.openclaw/openclaw.json"
+if [[ -f "${SECRETS_ENV}" ]] && command -v jq &>/dev/null; then
+  [[ -f "${CONFIG_FILE}" ]] || echo '{}' > "${CONFIG_FILE}"
+
+  declare -A TOKEN_PLUGIN_MAP=(
+    [DISCORD_BOT_TOKEN]=discord
+    [TELEGRAM_BOT_TOKEN]=telegram
+    [SLACK_BOT_TOKEN]=slack
+    [SLACK_APP_TOKEN]=slack
+  )
+
+  for TOKEN_NAME in "${!TOKEN_PLUGIN_MAP[@]}"; do
+    PLUGIN="${TOKEN_PLUGIN_MAP[${TOKEN_NAME}]}"
+    if grep -q "^${TOKEN_NAME}=" "${SECRETS_ENV}"; then
+      CURRENT="$(jq -r ".plugins.entries.${PLUGIN}.enabled // false" "${CONFIG_FILE}" 2>/dev/null)"
+      if [[ "${CURRENT}" != "true" ]]; then
+        CTMP="${CONFIG_FILE}.tmp"
+        jq ".plugins.entries.${PLUGIN}.enabled = true" "${CONFIG_FILE}" > "${CTMP}" && mv "${CTMP}" "${CONFIG_FILE}"
+      fi
+    fi
+  done
+
+  chown openclaw:openclaw "${CONFIG_FILE}"
+fi
 FETCHSCRIPT
   chmod 700 /usr/local/bin/fetch-openclaw-secrets
+}
+
+# ─── Auto-enable channel plugins based on configured secrets ──────────────
+# OpenClaw requires plugins.entries.<channel>.enabled = true in openclaw.json
+# to load channel plugins. This function reads the secrets env file and sets
+# the flag for each channel whose token is present.
+configure_channel_plugins() {
+  local config_file="${OPENCLAW_HOME}/.openclaw/openclaw.json"
+  local env_file="${SECRETS_ENV}"
+
+  # Nothing to do if env file doesn't exist or jq is missing
+  [[ -f "${env_file}" ]] || return 0
+  command -v jq &>/dev/null || return 0
+
+  # Ensure config file exists
+  if [[ ! -f "${config_file}" ]]; then
+    echo '{}' > "${config_file}"
+  fi
+
+  # Token → plugin channel mapping
+  local -A TOKEN_PLUGIN_MAP=(
+    [DISCORD_BOT_TOKEN]=discord
+    [TELEGRAM_BOT_TOKEN]=telegram
+    [SLACK_BOT_TOKEN]=slack
+    [SLACK_APP_TOKEN]=slack
+  )
+
+  local changed=false
+
+  for token_name in "${!TOKEN_PLUGIN_MAP[@]}"; do
+    local plugin="${TOKEN_PLUGIN_MAP[${token_name}]}"
+    # Check if this token is present in the env file (has a value)
+    if grep -q "^${token_name}=" "${env_file}"; then
+      # Check if already enabled
+      local current
+      current="$(jq -r ".plugins.entries.${plugin}.enabled // false" "${config_file}" 2>/dev/null)"
+      if [[ "${current}" != "true" ]]; then
+        # Set plugins.entries.<channel>.enabled = true
+        local tmp="${config_file}.tmp"
+        jq ".plugins.entries.${plugin}.enabled = true" "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
+        log "Enabled channel plugin: ${plugin}"
+        changed=true
+      fi
+    fi
+  done
+
+  # Fix ownership
+  chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${config_file}"
+
+  if [[ "${changed}" == "true" ]]; then
+    log "Channel plugin configuration updated"
+  fi
 }
 
 # ─── Try to fetch secrets on every boot ──────────────────────────────────────
@@ -222,18 +307,27 @@ fi
 
 fetch_secrets || true
 protect_credential_paths
+configure_channel_plugins
 
 # ─── Block metadata server access for the openclaw user ──────────────────────
 # The VM service account token is available at http://169.254.169.254 (the GCE
 # metadata server). A compromised OpenClaw process could steal this token and
-# exfiltrate all secrets from Secret Manager. Block the openclaw user while
-# allowing root (needed by ExecStartPre=+ fetch-openclaw-secrets).
+# exfiltrate all secrets from Secret Manager. Block the openclaw user from the
+# metadata HTTP API (port 80) while preserving DNS resolution (port 53), since
+# GCE uses the same IP (169.254.169.254) as the DNS nameserver.
 restrict_metadata_access() {
-  if ! iptables -C OUTPUT -d 169.254.169.254 -m owner --uid-owner "${OPENCLAW_USER}" -j DROP 2>/dev/null; then
-    iptables -A OUTPUT -d 169.254.169.254 -m owner --uid-owner "${OPENCLAW_USER}" -j DROP
-    log "Blocked metadata server access for user '${OPENCLAW_USER}'"
+  # Remove any legacy blanket rule that also blocked DNS
+  if iptables -C OUTPUT -d 169.254.169.254 -m owner --uid-owner "${OPENCLAW_USER}" -j DROP 2>/dev/null; then
+    iptables -D OUTPUT -d 169.254.169.254 -m owner --uid-owner "${OPENCLAW_USER}" -j DROP
+    log "Removed legacy blanket metadata block (also blocked DNS)"
+  fi
+
+  # Block only the metadata HTTP API (port 80) — preserves DNS (port 53)
+  if ! iptables -C OUTPUT -p tcp --dport 80 -d 169.254.169.254 -m owner --uid-owner "${OPENCLAW_USER}" -j DROP 2>/dev/null; then
+    iptables -A OUTPUT -p tcp --dport 80 -d 169.254.169.254 -m owner --uid-owner "${OPENCLAW_USER}" -j DROP
+    log "Blocked metadata server HTTP access for user '${OPENCLAW_USER}' (DNS preserved)"
   else
-    log "Metadata server block already in place"
+    log "Metadata server HTTP block already in place"
   fi
 
   # Persist across reboots (iptables-persistent installed during provisioning)
@@ -250,6 +344,13 @@ if [ -f "${SENTINEL_FILE}" ]; then
 
   # Always update the fetch-secrets helper so fixes propagate on reboot
   install_fetch_script
+
+  # Ensure discord.js is installed (may be missing on older provisions)
+  OPENCLAW_PKG_DIR="$(npm root -g)/openclaw"
+  if [[ -d "${OPENCLAW_PKG_DIR}" ]] && [[ ! -d "${OPENCLAW_PKG_DIR}/node_modules/discord.js" ]]; then
+    log "Installing discord.js (self-repair)…"
+    npm install --prefix "${OPENCLAW_PKG_DIR}" discord.js
+  fi
 
   # Self-repair: detect outdated unit files and patch or re-provision
   UNIT_FILE="/etc/systemd/system/openclaw-gateway.service"
@@ -393,6 +494,13 @@ fi
 if ! command -v openclaw &>/dev/null; then
   log "Installing openclaw…"
   npm install -g openclaw@latest
+fi
+
+# discord.js is not bundled with openclaw and must be installed separately
+OPENCLAW_PKG_DIR="$(npm root -g)/openclaw"
+if [[ -d "${OPENCLAW_PKG_DIR}" ]] && [[ ! -d "${OPENCLAW_PKG_DIR}/node_modules/discord.js" ]]; then
+  log "Installing discord.js…"
+  npm install --prefix "${OPENCLAW_PKG_DIR}" discord.js
 fi
 
 OPENCLAW_BIN="$(which openclaw)"
