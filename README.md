@@ -127,7 +127,7 @@ Each secret in the GCP project becomes an environment variable for OpenClaw. Cre
 
 ### Required secrets
 
-The deploy script pre-creates all secrets with placeholder values. You just need to update the ones you want to use.
+The deploy script pre-creates all secrets. Required secrets get a placeholder value; optional ones are created as empty resources (no version). Add a version to activate an optional secret.
 
 | Secret | Value | How to obtain |
 |--------|-------|---------------|
@@ -161,14 +161,14 @@ gcloud compute ssh iap-vps --tunnel-through-iap \
 
 ### Optional secrets
 
-These are also pre-created with `DISABLED` as the value. Update the ones you need:
+These are pre-created as empty resources (no version). Add a version to activate:
 
 | Secret | Value | Notes |
 |--------|-------|-------|
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token (`123456:ABC-DEF...`) | From [@BotFather](https://t.me/BotFather) |
-| `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) | See [Slack setup](#slack-setup) below |
-| `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`) | See [Slack setup](#slack-setup) below |
-| `DISCORD_BOT_TOKEN` | Discord bot token | From [Discord Developer Portal](https://discord.com/developers/applications) |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token (`123456:ABC-DEF...`) | From [@BotFather](https://t.me/BotFather) — [docs](https://docs.openclaw.ai/channels/telegram) |
+| `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) | See [Slack setup](#slack-setup) — [docs](https://docs.openclaw.ai/channels/slack) |
+| `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`) | See [Slack setup](#slack-setup) — [docs](https://docs.openclaw.ai/channels/slack) |
+| `DISCORD_BOT_TOKEN` | Discord bot token | See [Discord setup](#discord-setup) — [docs](https://docs.openclaw.ai/channels/discord) |
 | `OPENAI_API_KEY` | OpenAI API key | From [OpenAI Platform](https://platform.openai.com/api-keys) |
 | `OPENROUTER_API_KEY` | OpenRouter API key | From [OpenRouter](https://openrouter.ai/keys) |
 | `GEMINI_API_KEY` | Google Gemini API key | From [Google AI Studio](https://aistudio.google.com/apikey) |
@@ -302,6 +302,65 @@ gcloud compute ssh iap-vps --tunnel-through-iap -- \
 ```
 
 Pairing codes expire after about 1 hour. If a code expires, have the user DM the bot again to get a fresh one. Each approved user gets their own isolated conversation context.
+
+### Discord setup
+
+Connect OpenClaw to Discord so users can chat with your bot in Discord channels and DMs.
+
+#### 1. Create a Discord application
+
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and click **New Application**
+2. Name your app (e.g. "OpenClaw") and click **Create**
+
+#### 2. Create a bot and copy the token
+
+1. In the left sidebar, go to **Bot**
+2. Click **Reset Token** (or **Copy** if shown) — save this token, you'll need it below
+3. Under **Privileged Gateway Intents**, enable:
+   - **Message Content Intent** (required — without this the bot receives empty messages)
+   - **Server Members Intent** (recommended — needed for user display names)
+
+> **Warning:** If you skip the Message Content Intent, the bot will fail to connect with Discord error code 4014. You can enable it at any time and restart the gateway.
+
+#### 3. Generate an invite URL
+
+1. In the left sidebar, go to **OAuth2 → URL Generator**
+2. Under **Scopes**, check `bot`
+3. Under **Bot Permissions**, check at minimum:
+   - Send Messages
+   - Read Message History
+   - View Channels
+4. Copy the generated URL at the bottom
+
+#### 4. Add the bot to your server
+
+1. Open the invite URL in your browser
+2. Select the Discord server where you want the bot
+3. Click **Authorize**
+
+#### 5. Store the token and restart
+
+```bash
+gcloud secrets versions add DISCORD_BOT_TOKEN \
+  --project=YOUR_PROJECT_ID \
+  --data-file=- <<< 'your-bot-token'
+
+# Restart to pick up the new secret (plugin is auto-enabled on restart)
+gcloud compute ssh iap-vps --tunnel-through-iap \
+  -- sudo systemctl restart openclaw-gateway
+```
+
+#### 6. Verify
+
+```bash
+# Check logs for Discord plugin loading
+gcloud compute ssh iap-vps --tunnel-through-iap \
+  -- sudo journalctl -u openclaw-gateway --no-pager -n 50 | grep -i discord
+```
+
+You should see `[discord]` in the log output, indicating the plugin loaded and connected.
+
+For more details, see the [OpenClaw Discord documentation](https://docs.openclaw.ai/channels/discord).
 
 ### Update a secret
 

@@ -316,79 +316,88 @@ else
   echo "  ⚠  Secret Manager API not enabled — skipping."
 fi
 
-# ─── Pre-create OpenClaw secrets (placeholder values) ─────────────────────
-# Creates secrets that don't exist yet so the user only needs to fill in values.
-# Required secrets get a "REPLACE_ME" placeholder; optional ones get "DISABLED".
+# ─── Pre-create OpenClaw secrets ──────────────────────────────────────────
+# Creates secrets that don't exist yet so the user only needs to add a version
+# when they're ready. Required/gateway secrets get an initial version; optional
+# provider and channel secrets are created as empty resources (no version).
 if [[ "${SM_READY}" == "true" ]]; then
   echo ""
-  echo "▶ Pre-creating OpenClaw secrets (placeholders for unconfigured ones)…"
+  echo "▶ Pre-creating OpenClaw secrets…"
 
   # Auto-generate a gateway token for API auth
   GENERATED_GW_TOKEN="$(openssl rand -hex 32)"
 
-  # Format: "SECRET_NAME|PLACEHOLDER|CATEGORY"
+  # Format: "SECRET_NAME|INITIAL_VALUE|CATEGORY"
+  # INITIAL_VALUE is empty for optional secrets (created without a version).
   # Categories: required, provider, channel, gateway
   OPENCLAW_SECRETS=(
     # ── Required ──────────────────────────────────────────────────────────
     "ANTHROPIC_API_KEY|REPLACE_ME|required"
 
-    # ── Optional AI providers ─────────────────────────────────────────────
-    "OPENAI_API_KEY|DISABLED|provider"
-    "OPENROUTER_API_KEY|DISABLED|provider"
-    "GEMINI_API_KEY|DISABLED|provider"
-    "XAI_API_KEY|DISABLED|provider"
-    "GROQ_API_KEY|DISABLED|provider"
-    "MISTRAL_API_KEY|DISABLED|provider"
-    "DEEPGRAM_API_KEY|DISABLED|provider"
+    # ── Optional AI providers (empty = no initial version) ────────────────
+    "OPENAI_API_KEY||provider"
+    "OPENROUTER_API_KEY||provider"
+    "GEMINI_API_KEY||provider"
+    "XAI_API_KEY||provider"
+    "GROQ_API_KEY||provider"
+    "MISTRAL_API_KEY||provider"
+    "DEEPGRAM_API_KEY||provider"
 
-    # ── Channel: Telegram ─────────────────────────────────────────────────
-    "TELEGRAM_BOT_TOKEN|DISABLED|channel"
-
-    # ── Channel: Discord ──────────────────────────────────────────────────
-    "DISCORD_BOT_TOKEN|DISABLED|channel"
-
-    # ── Channel: Slack ────────────────────────────────────────────────────
-    "SLACK_BOT_TOKEN|DISABLED|channel"
-    "SLACK_APP_TOKEN|DISABLED|channel"
+    # ── Channel tokens (empty = no initial version) ───────────────────────
+    "TELEGRAM_BOT_TOKEN||channel"
+    "DISCORD_BOT_TOKEN||channel"
+    "SLACK_BOT_TOKEN||channel"
+    "SLACK_APP_TOKEN||channel"
 
     # ── Gateway / auth ────────────────────────────────────────────────────
     "OPENCLAW_GATEWAY_TOKEN|${GENERATED_GW_TOKEN}|gateway"
     "OPENCLAW_PRIMARY_MODEL|claude-sonnet-4-20250514|gateway"
   )
 
-  CREATED=0
+  CREATED_EMPTY=0
+  CREATED_WITH_VALUE=0
   EXISTING=0
 
   for ENTRY in "${OPENCLAW_SECRETS[@]}"; do
     SECRET_NAME="${ENTRY%%|*}"
     REST="${ENTRY#*|}"
-    PLACEHOLDER="${REST%%|*}"
+    INITIAL_VALUE="${REST%%|*}"
     CATEGORY="${REST#*|}"
 
     if gcloud secrets describe "${SECRET_NAME}" \
          --project="${PROJECT_ID}" &>/dev/null; then
       EXISTING=$((EXISTING + 1))
-    else
-      printf '%s' "${PLACEHOLDER}" \
+    elif [[ -n "${INITIAL_VALUE}" ]]; then
+      # Create with an initial version
+      printf '%s' "${INITIAL_VALUE}" \
         | gcloud secrets create "${SECRET_NAME}" \
             --project="${PROJECT_ID}" \
             --data-file=- \
             --quiet 2>/dev/null && {
-        CREATED=$((CREATED + 1))
+        CREATED_WITH_VALUE=$((CREATED_WITH_VALUE + 1))
+      } || {
+        echo "  ✗ Could not create secret ${SECRET_NAME}"
+      }
+    else
+      # Create as empty resource (no version) — user adds a version to activate
+      gcloud secrets create "${SECRET_NAME}" \
+        --project="${PROJECT_ID}" \
+        --quiet 2>/dev/null && {
+        CREATED_EMPTY=$((CREATED_EMPTY + 1))
       } || {
         echo "  ✗ Could not create secret ${SECRET_NAME}"
       }
     fi
   done
 
-  echo "  ✓ Secrets: ${CREATED} created, ${EXISTING} already existed"
+  echo "  ✓ Secrets: ${CREATED_EMPTY} created (empty), ${CREATED_WITH_VALUE} created (with value), ${EXISTING} already existed"
 
   # Show which required secrets still need real values
   NEEDS_UPDATE=()
   for ENTRY in "${OPENCLAW_SECRETS[@]}"; do
     SECRET_NAME="${ENTRY%%|*}"
     REST="${ENTRY#*|}"
-    PLACEHOLDER="${REST%%|*}"
+    INITIAL_VALUE="${REST%%|*}"
     CATEGORY="${REST#*|}"
 
     if [[ "${CATEGORY}" == "required" ]]; then
@@ -738,14 +747,16 @@ echo "  The tunnel stays open as long as the SSH session is active."
 echo ""
 echo "  ── Secrets Management ──────────────────────────────────"
 echo ""
-echo "  Secrets are pre-created with placeholder values."
+echo "  Required secrets have placeholder values; optional ones are"
+echo "  empty (no version). Add a version to activate them."
+echo ""
 echo "  Update the required one(s) with real values:"
 echo ""
 echo "    gcloud secrets versions add ANTHROPIC_API_KEY \\"
 echo "      --project=${PROJECT_ID} \\"
 echo "      --data-file=- <<< 'sk-ant-api03-...'"
 echo ""
-echo "  Optional — enable channels by updating their tokens:"
+echo "  Optional — enable channels by adding their tokens:"
 echo ""
 echo "    gcloud secrets versions add TELEGRAM_BOT_TOKEN \\"
 echo "      --project=${PROJECT_ID} --data-file=- <<< 'bot-token'"
@@ -768,5 +779,5 @@ echo "      -- sudo systemctl restart openclaw-gateway"
 echo ""
 echo "  ⚠  This project should be dedicated to this deployment."
 echo "     All secrets in the project are loaded into OpenClaw."
-echo "     Secrets set to \"DISABLED\" are ignored by OpenClaw."
+echo "     Secrets without versions are ignored until you add a value."
 echo "════════════════════════════════════════════════════════════"
