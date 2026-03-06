@@ -210,17 +210,20 @@ tool access:
 |---------|---------|--------|
 | `agents.defaults.sandbox.mode` | `all` | All agent sessions run in Docker containers |
 | `agents.defaults.sandbox.docker.network` | `bridge` | Containers have internet access (for GitHub, web, APIs) |
-| `agents.defaults.sandbox.docker.setupCommand` | *(see below)* | One-time package install when container is created |
 | `tools.elevated.enabled` | `false` | Agents cannot use elevated/admin tools |
 | `tools.fs.workspaceOnly` | `true` | Filesystem access limited to agent workspace |
 
-The `setupCommand` installs common tools into each sandbox container on first
-creation: `curl`, `wget`, `git`, `jq`, `python3`, and `gh` (GitHub CLI). To
-customise the installed packages, update the config:
+The startup script builds a custom `openclaw-sandbox:bookworm-slim` Docker image
+with common dev tools pre-installed: `curl`, `wget`, `git`, `jq`, `python3`, and
+`gh` (GitHub CLI). To customise the image, edit the `SANDBOX_DOCKERFILE` heredoc
+in `startup.sh` and rebuild:
 
 ```bash
-sudo -u openclaw openclaw config set agents.defaults.sandbox.docker.setupCommand \
-  'apt-get update -qq && apt-get install -y -qq curl wget git jq python3 gh'
+# Rebuild manually (or reboot the VM to trigger startup.sh)
+sudo docker build -t openclaw-sandbox:bookworm-slim - <<'EOF'
+FROM debian:bookworm-slim
+RUN apt-get update -qq && apt-get install -y -qq curl wget git jq python3 gh
+EOF
 sudo -u openclaw openclaw sandbox recreate --all --force
 ```
 

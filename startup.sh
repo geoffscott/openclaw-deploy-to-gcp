@@ -506,6 +506,31 @@ if ! command -v docker &>/dev/null; then
   log "Docker version: $(docker --version)"
 fi
 
+# Build sandbox image with common dev tools (curl, wget, git, jq, python3, gh)
+# This replaces the default openclaw-sandbox:bookworm-slim tag so OpenClaw
+# picks it up automatically — no setupCommand needed.
+if ! docker image inspect openclaw-sandbox:bookworm-slim &>/dev/null \
+   || ! docker run --rm openclaw-sandbox:bookworm-slim which git &>/dev/null; then
+  log "Building sandbox image with dev tools…"
+  docker build -t openclaw-sandbox:bookworm-slim - <<'SANDBOX_DOCKERFILE'
+FROM debian:bookworm-slim
+RUN apt-get update -qq && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+      curl wget git jq python3 ca-certificates gnupg && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/gh.gpg && \
+    chmod a+r /etc/apt/keyrings/gh.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/gh.gpg] \
+      https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update -qq && \
+    apt-get install -y -qq gh && \
+    rm -rf /var/lib/apt/lists/*
+SANDBOX_DOCKERFILE
+  log "Sandbox image built: $(docker images openclaw-sandbox:bookworm-slim --format '{{.ID}}')"
+fi
+
 # ─── 2. Install OpenClaw globally ───────────────────────────────────────────
 if ! command -v openclaw &>/dev/null; then
   log "Installing openclaw…"
@@ -585,7 +610,6 @@ seed_claude_models() {
     .agents.defaults.models["anthropic/claude-opus-4-6"] = {} |
     .agents.defaults.sandbox.mode = "all" |
     .agents.defaults.sandbox.docker.network = "bridge" |
-    .agents.defaults.sandbox.docker.setupCommand = "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl wget git jq python3 ca-certificates gnupg && install -m 0755 -d /etc/apt/keyrings && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/gh.gpg && chmod a+r /etc/apt/keyrings/gh.gpg && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/gh.gpg] https://cli.github.com/packages stable main\" > /etc/apt/sources.list.d/github-cli.list && apt-get update -qq && apt-get install -y -qq gh && rm -rf /var/lib/apt/lists/*" |
     .tools.elevated.enabled = false |
     .tools.fs.workspaceOnly = true
   ' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
