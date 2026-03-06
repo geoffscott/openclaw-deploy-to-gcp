@@ -210,8 +210,19 @@ tool access:
 |---------|---------|--------|
 | `agents.defaults.sandbox.mode` | `all` | All agent sessions run in Docker containers |
 | `agents.defaults.sandbox.docker.network` | `bridge` | Containers have internet access (for GitHub, web, APIs) |
+| `agents.defaults.sandbox.docker.setupCommand` | *(see below)* | One-time package install when container is created |
 | `tools.elevated.enabled` | `false` | Agents cannot use elevated/admin tools |
 | `tools.fs.workspaceOnly` | `true` | Filesystem access limited to agent workspace |
+
+The `setupCommand` installs common tools into each sandbox container on first
+creation: `curl`, `wget`, `git`, `jq`, `python3`, and `gh` (GitHub CLI). To
+customise the installed packages, update the config:
+
+```bash
+sudo -u openclaw openclaw config set agents.defaults.sandbox.docker.setupCommand \
+  'apt-get update -qq && apt-get install -y -qq curl wget git jq python3 gh'
+sudo -u openclaw openclaw sandbox recreate --all --force
+```
 
 This prevents agents from modifying gateway config, accessing other agents'
 data, or running arbitrary commands on the host. To grant an agent elevated

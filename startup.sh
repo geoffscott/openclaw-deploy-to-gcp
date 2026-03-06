@@ -585,6 +585,7 @@ seed_claude_models() {
     .agents.defaults.models["anthropic/claude-opus-4-6"] = {} |
     .agents.defaults.sandbox.mode = "all" |
     .agents.defaults.sandbox.docker.network = "bridge" |
+    .agents.defaults.sandbox.docker.setupCommand = "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl wget git jq python3 ca-certificates gnupg && install -m 0755 -d /etc/apt/keyrings && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/gh.gpg && chmod a+r /etc/apt/keyrings/gh.gpg && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/gh.gpg] https://cli.github.com/packages stable main\" > /etc/apt/sources.list.d/github-cli.list && apt-get update -qq && apt-get install -y -qq gh && rm -rf /var/lib/apt/lists/*" |
     .tools.elevated.enabled = false |
     .tools.fs.workspaceOnly = true
   ' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
