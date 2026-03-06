@@ -209,6 +209,7 @@ tool access:
 | Setting | Default | Effect |
 |---------|---------|--------|
 | `agents.defaults.sandbox.mode` | `all` | All agent sessions run in Docker containers |
+| `agents.defaults.sandbox.docker.network` | `bridge` | Containers have internet access (for GitHub, web, APIs) |
 | `tools.elevated.enabled` | `false` | Agents cannot use elevated/admin tools |
 | `tools.fs.workspaceOnly` | `true` | Filesystem access limited to agent workspace |
 

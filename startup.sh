@@ -584,6 +584,7 @@ seed_claude_models() {
     .agents.defaults.models["anthropic/claude-sonnet-4-6"] = {} |
     .agents.defaults.models["anthropic/claude-opus-4-6"] = {} |
     .agents.defaults.sandbox.mode = "all" |
+    .agents.defaults.sandbox.docker.network = "bridge" |
     .tools.elevated.enabled = false |
     .tools.fs.workspaceOnly = true
   ' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
