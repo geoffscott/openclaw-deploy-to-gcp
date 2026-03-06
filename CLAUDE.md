@@ -201,6 +201,30 @@ sudo -u openclaw openclaw config set agents.defaults.model.primary \
 # Change for a specific agent (via the web UI or config)
 ```
 
+### Agent sandboxing
+
+By default, agents are provisioned with sandbox mode enabled and restricted
+tool access:
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| `agents.defaults.sandbox.mode` | `all` | All agent sessions run in Docker containers |
+| `agents.defaults.tools.elevated.enabled` | `false` | Agents cannot use elevated/admin tools |
+| `agents.defaults.tools.fs.workspaceOnly` | `true` | Filesystem access limited to agent workspace |
+
+This prevents agents from modifying gateway config, accessing other agents'
+data, or running arbitrary commands on the host. To grant an agent elevated
+access (e.g., for admin tasks), override per-agent:
+
+```bash
+# Grant elevated tools to a specific agent
+sudo -u openclaw openclaw config set \
+  'agents.list[0].tools.elevated.enabled' true
+```
+
+Gateway administration (restarts, config changes, secret management) should
+be performed from the CLI on your local machine, not by agents.
+
 ### Credential isolation on the VM
 
 | Path | Protection |

@@ -568,10 +568,13 @@ seed_claude_models() {
     .agents.defaults.model.primary = "anthropic/claude-haiku-4-5-20251001" |
     .agents.defaults.models["anthropic/claude-haiku-4-5-20251001"] = {} |
     .agents.defaults.models["anthropic/claude-sonnet-4-6"] = {} |
-    .agents.defaults.models["anthropic/claude-opus-4-6"] = {}
+    .agents.defaults.models["anthropic/claude-opus-4-6"] = {} |
+    .agents.defaults.sandbox.mode = "all" |
+    .agents.defaults.tools.elevated.enabled = false |
+    .agents.defaults.tools.fs.workspaceOnly = true
   ' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
   chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${config_file}"
-  log "Seeded Claude models (haiku-4.5 default, sonnet-4.6, opus-4.6)"
+  log "Seeded Claude models (haiku-4.5 default, sonnet-4.6, opus-4.6) with sandbox enabled"
 }
 seed_claude_models
 
