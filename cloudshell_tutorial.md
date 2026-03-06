@@ -123,7 +123,42 @@ gcloud compute instances start iap-vps --zone=us-central1-a --quiet
 
 ---
 
-## Step 5 — Connect to your VPS
+## Step 5 — Set up GitHub integration (optional)
+
+If you want your agents to work with GitHub repositories (clone, branch, submit PRs), set up credentials now. Secret values are stored in Secret Manager and never written to disk on the VM.
+
+### Add your GitHub username and email
+
+**Run in Cloud Shell:**
+
+```bash
+gcloud secrets versions add GITHUB_USERNAME --data-file=- <<< 'your-github-username'
+gcloud secrets versions add GITHUB_EMAIL --data-file=- <<< 'you@example.com'
+```
+
+### Create and add a GitHub token
+
+1. Go to [GitHub Settings > Developer Settings > Personal Access Tokens > Fine-grained tokens](https://github.com/settings/tokens?type=beta)
+2. Click **Generate new token**
+3. Give it a name (e.g. "OpenClaw"), set expiration, and select the repositories your agents need access to
+4. Under **Permissions**, grant at minimum: Contents (read/write), Pull requests (read/write), Issues (read/write)
+5. Click **Generate token** and copy it
+
+**Run in Cloud Shell:**
+
+```bash
+gcloud secrets versions add GITHUB_TOKEN --data-file=- <<< 'github_pat_...'
+```
+
+Or open [Secret Manager](https://console.cloud.google.com/security/secret-manager) and add the value through the UI.
+
+> These credentials are picked up automatically on the next gateway restart. The startup script configures `git` and the GitHub CLI (`gh`) for the OpenClaw user.
+
+Click **Next** when ready (or skip this step and add credentials later).
+
+---
+
+## Step 6 — Connect to your VPS
 
 Once deployment finishes, SSH into the instance through IAP:
 
@@ -143,7 +178,7 @@ Replace `iap-vps` and `us-central1-a` with your chosen instance name and zone if
 
 ---
 
-## Step 6 — Verify OpenClaw
+## Step 7 — Verify OpenClaw
 
 OpenClaw is installed automatically on first boot (takes 2-3 minutes). These commands assume you're already connected via SSH from Step 5.
 
@@ -167,7 +202,7 @@ sudo systemctl restart openclaw-gateway
 
 ---
 
-## Step 7 — Access the Web UI
+## Step 8 — Access the Web UI
 
 The OpenClaw gateway runs on `localhost:18789` inside the VM. To open it in your browser, forward the port through the IAP tunnel.
 
@@ -186,7 +221,7 @@ Then open [http://localhost:18789](http://localhost:18789) in your browser. The 
 
 ---
 
-## Step 8 — Verify access control
+## Step 9 — Verify access control
 
 Confirm the instance has no external IP:
 

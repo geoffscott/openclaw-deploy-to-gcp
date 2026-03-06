@@ -92,8 +92,11 @@ resources (no version). Add a version to activate an optional secret.
 | `DISCORD_BOT_TOKEN` | Channel | *(no version)* |
 | `SLACK_BOT_TOKEN` | Channel | *(no version)* |
 | `SLACK_APP_TOKEN` | Channel | *(no version)* |
+| `GITHUB_TOKEN` | GitHub | *(no version)* |
+| `GITHUB_USERNAME` | GitHub | *(no version)* |
+| `GITHUB_EMAIL` | GitHub | *(no version)* |
 | `OPENCLAW_GATEWAY_TOKEN` | Gateway | Auto-generated (hex) |
-| `OPENCLAW_PRIMARY_MODEL` | Gateway | `claude-sonnet-4-20250514` |
+| `OPENCLAW_PRIMARY_MODEL` | Gateway | `claude-haiku-4-5-20251001` |
 
 Secrets without versions are ignored until the user adds a value with
 `gcloud secrets versions add`.
@@ -113,6 +116,89 @@ gcloud secrets versions add TELEGRAM_BOT_TOKEN \
 gcloud compute ssh iap-vps --zone=us-central1-a \
   --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
   -- sudo systemctl restart openclaw-gateway
+```
+
+### Multi-agent channel setup
+
+To run multiple agents, each connected to a different Discord/Telegram/Slack
+server, create additional bot token secrets using the naming convention:
+
+```
+DISCORD_BOT_TOKEN_AGENTNAME
+TELEGRAM_BOT_TOKEN_AGENTNAME
+SLACK_BOT_TOKEN_AGENTNAME
+```
+
+The startup script uses prefix matching — any secret starting with
+`DISCORD_BOT_TOKEN` (including `DISCORD_BOT_TOKEN_ANANDA`) auto-enables the
+Discord plugin. The same applies to Telegram and Slack prefixes.
+
+After adding the secret, SSH into the VM and register the account + routing:
+
+```bash
+# 1. Register the channel account
+sudo -u openclaw openclaw channels add \
+  --channel discord --account agentname --token 'the-bot-token'
+
+# 2. Set up routing (maps channel account → agent)
+sudo -u openclaw openclaw config set bindings '[
+  {"agentId":"main","match":{"channel":"discord","accountId":"main"}},
+  {"agentId":"agentname","match":{"channel":"discord","accountId":"agentname"}}
+]' --json
+
+# 3. Restart to apply
+sudo systemctl restart openclaw-gateway
+
+# 4. Verify
+sudo -u openclaw openclaw agents list --bindings
+sudo -u openclaw openclaw channels list
+```
+
+### GitHub integration
+
+When `GITHUB_TOKEN`, `GITHUB_USERNAME`, and `GITHUB_EMAIL` secrets have values,
+the startup script automatically configures git and the GitHub CLI (`gh`) for the
+`openclaw` user. This enables agents to clone repos, create branches, and submit
+pull requests.
+
+```bash
+# Add GitHub credentials
+gcloud secrets versions add GITHUB_TOKEN \
+  --project="${GCP_PROJECT_ID}" \
+  --data-file=- <<< 'ghp_...'
+
+gcloud secrets versions add GITHUB_USERNAME \
+  --project="${GCP_PROJECT_ID}" \
+  --data-file=- <<< 'your-username'
+
+gcloud secrets versions add GITHUB_EMAIL \
+  --project="${GCP_PROJECT_ID}" \
+  --data-file=- <<< 'you@example.com'
+
+# Restart to pick up credentials
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo systemctl restart openclaw-gateway
+```
+
+### Claude models
+
+The startup script seeds all available Claude models on first provision:
+
+| Model | ID |
+|-------|----|
+| Haiku 4.5 (default) | `anthropic/claude-haiku-4-5-20251001` |
+| Sonnet 4.6 | `anthropic/claude-sonnet-4-6` |
+| Opus 4.6 | `anthropic/claude-opus-4-6` |
+
+The default model is Haiku 4.5 to keep costs low. Change per-agent or globally:
+
+```bash
+# Change default for all agents
+sudo -u openclaw openclaw config set agents.defaults.model.primary \
+  "anthropic/claude-sonnet-4-6"
+
+# Change for a specific agent (via the web UI or config)
 ```
 
 ### Credential isolation on the VM
