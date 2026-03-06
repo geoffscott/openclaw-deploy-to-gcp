@@ -201,6 +201,45 @@ sudo -u openclaw openclaw config set agents.defaults.model.primary \
 # Change for a specific agent (via the web UI or config)
 ```
 
+### Agent sandboxing
+
+By default, agents are provisioned with sandbox mode enabled and restricted
+tool access:
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| `agents.defaults.sandbox.mode` | `all` | All agent sessions run in Docker containers |
+| `agents.defaults.sandbox.docker.network` | `bridge` | Containers have internet access (for GitHub, web, APIs) |
+| `tools.elevated.enabled` | `false` | Agents cannot use elevated/admin tools |
+| `tools.fs.workspaceOnly` | `true` | Filesystem access limited to agent workspace |
+
+The startup script builds a custom `openclaw-sandbox:bookworm-slim` Docker image
+with common dev tools pre-installed: `curl`, `wget`, `git`, `jq`, `python3`, and
+`gh` (GitHub CLI). To customise the image, edit the `SANDBOX_DOCKERFILE` heredoc
+in `startup.sh` and rebuild:
+
+```bash
+# Rebuild manually (or reboot the VM to trigger startup.sh)
+sudo docker build -t openclaw-sandbox:bookworm-slim - <<'EOF'
+FROM debian:bookworm-slim
+RUN apt-get update -qq && apt-get install -y -qq curl wget git jq python3 gh
+EOF
+sudo -u openclaw openclaw sandbox recreate --all --force
+```
+
+This prevents agents from modifying gateway config, accessing other agents'
+data, or running arbitrary commands on the host. To grant an agent elevated
+access (e.g., for admin tasks), override per-agent:
+
+```bash
+# Grant elevated tools to a specific agent
+sudo -u openclaw openclaw config set \
+  'agents.list[0].tools.elevated.enabled' true
+```
+
+Gateway administration (restarts, config changes, secret management) should
+be performed from the CLI on your local machine, not by agents.
+
 ### Credential isolation on the VM
 
 | Path | Protection |
