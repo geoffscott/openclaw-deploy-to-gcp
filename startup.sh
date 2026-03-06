@@ -570,8 +570,8 @@ seed_claude_models() {
     .agents.defaults.models["anthropic/claude-sonnet-4-6"] = {} |
     .agents.defaults.models["anthropic/claude-opus-4-6"] = {} |
     .agents.defaults.sandbox.mode = "all" |
-    .agents.defaults.tools.elevated.enabled = false |
-    .agents.defaults.tools.fs.workspaceOnly = true
+    .tools.elevated.enabled = false |
+    .tools.fs.workspaceOnly = true
   ' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
   chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${config_file}"
   log "Seeded Claude models (haiku-4.5 default, sonnet-4.6, opus-4.6) with sandbox enabled"

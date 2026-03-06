@@ -209,8 +209,8 @@ tool access:
 | Setting | Default | Effect |
 |---------|---------|--------|
 | `agents.defaults.sandbox.mode` | `all` | All agent sessions run in Docker containers |
-| `agents.defaults.tools.elevated.enabled` | `false` | Agents cannot use elevated/admin tools |
-| `agents.defaults.tools.fs.workspaceOnly` | `true` | Filesystem access limited to agent workspace |
+| `tools.elevated.enabled` | `false` | Agents cannot use elevated/admin tools |
+| `tools.fs.workspaceOnly` | `true` | Filesystem access limited to agent workspace |
 
 This prevents agents from modifying gateway config, accessing other agents'
 data, or running arbitrary commands on the host. To grant an agent elevated
