@@ -176,6 +176,9 @@ These are pre-created as empty resources (no version). Add a version to activate
 | `GROQ_API_KEY` | Groq API key | From [Groq Console](https://console.groq.com/keys) |
 | `MISTRAL_API_KEY` | Mistral API key | From [Mistral Console](https://console.mistral.ai/api-keys) |
 | `DEEPGRAM_API_KEY` | Deepgram API key | From [Deepgram Console](https://console.deepgram.com/) |
+| `GITHUB_TOKEN` | GitHub personal access token | From [GitHub Settings](https://github.com/settings/tokens?type=beta) |
+| `GITHUB_USERNAME` | Your GitHub username | For git commit authorship |
+| `GITHUB_EMAIL` | Your email for git commits | For git commit authorship |
 
 ```bash
 # Example: enable Telegram
@@ -361,6 +364,40 @@ gcloud compute ssh iap-vps --tunnel-through-iap \
 You should see `[discord]` in the log output, indicating the plugin loaded and connected.
 
 For more details, see the [OpenClaw Discord documentation](https://docs.openclaw.ai/channels/discord).
+
+### Multi-agent setup
+
+To run multiple agents (each with its own bot on a different server), create additional bot token secrets using the naming convention `CHANNEL_BOT_TOKEN_AGENTNAME`:
+
+```bash
+# Create a secret for a second Discord bot
+gcloud secrets create DISCORD_BOT_TOKEN_MYAGENT \
+  --replication-policy=automatic --project=YOUR_PROJECT_ID
+
+# Add the token value (or use Secret Manager UI)
+gcloud secrets versions add DISCORD_BOT_TOKEN_MYAGENT \
+  --project=YOUR_PROJECT_ID \
+  --data-file=- <<< 'bot-token-here'
+```
+
+Then SSH into the VM to register the account and configure routing:
+
+```bash
+# Register the channel account
+sudo -u openclaw openclaw channels add \
+  --channel discord --account myagent --token 'bot-token-here'
+
+# Set up routing bindings (maps each channel account to an agent)
+sudo -u openclaw openclaw config set bindings '[
+  {"agentId":"main","match":{"channel":"discord","accountId":"main"}},
+  {"agentId":"myagent","match":{"channel":"discord","accountId":"myagent"}}
+]' --json
+
+# Restart to apply
+sudo systemctl restart openclaw-gateway
+```
+
+The same pattern works for Telegram (`TELEGRAM_BOT_TOKEN_AGENTNAME`) and Slack (`SLACK_BOT_TOKEN_AGENTNAME`).
 
 ### Update a secret
 

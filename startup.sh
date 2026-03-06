@@ -223,16 +223,16 @@ CONFIG_FILE="/home/openclaw/.openclaw/openclaw.json"
 if [[ -f "${SECRETS_ENV}" ]] && command -v jq &>/dev/null; then
   [[ -f "${CONFIG_FILE}" ]] || echo '{}' > "${CONFIG_FILE}"
 
-  declare -A TOKEN_PLUGIN_MAP=(
+  declare -A TOKEN_PREFIX_PLUGIN_MAP=(
     [DISCORD_BOT_TOKEN]=discord
     [TELEGRAM_BOT_TOKEN]=telegram
     [SLACK_BOT_TOKEN]=slack
     [SLACK_APP_TOKEN]=slack
   )
 
-  for TOKEN_NAME in "${!TOKEN_PLUGIN_MAP[@]}"; do
-    PLUGIN="${TOKEN_PLUGIN_MAP[${TOKEN_NAME}]}"
-    if grep -q "^${TOKEN_NAME}=" "${SECRETS_ENV}"; then
+  for TOKEN_PREFIX in "${!TOKEN_PREFIX_PLUGIN_MAP[@]}"; do
+    PLUGIN="${TOKEN_PREFIX_PLUGIN_MAP[${TOKEN_PREFIX}]}"
+    if grep -q "^${TOKEN_PREFIX}" "${SECRETS_ENV}"; then
       CURRENT="$(jq -r ".plugins.entries.${PLUGIN}.enabled // false" "${CONFIG_FILE}" 2>/dev/null)"
       if [[ "${CURRENT}" != "true" ]]; then
         CTMP="${CONFIG_FILE}.tmp"
@@ -264,8 +264,10 @@ configure_channel_plugins() {
     echo '{}' > "${config_file}"
   fi
 
-  # Token → plugin channel mapping
-  local -A TOKEN_PLUGIN_MAP=(
+  # Token prefix → plugin channel mapping
+  # Uses prefix matching so DISCORD_BOT_TOKEN and DISCORD_BOT_TOKEN_AGENTNAME
+  # both enable the discord plugin. Same for Telegram and Slack.
+  local -A TOKEN_PREFIX_PLUGIN_MAP=(
     [DISCORD_BOT_TOKEN]=discord
     [TELEGRAM_BOT_TOKEN]=telegram
     [SLACK_BOT_TOKEN]=slack
@@ -274,10 +276,10 @@ configure_channel_plugins() {
 
   local changed=false
 
-  for token_name in "${!TOKEN_PLUGIN_MAP[@]}"; do
-    local plugin="${TOKEN_PLUGIN_MAP[${token_name}]}"
-    # Check if this token is present in the env file (has a value)
-    if grep -q "^${token_name}=" "${env_file}"; then
+  for token_prefix in "${!TOKEN_PREFIX_PLUGIN_MAP[@]}"; do
+    local plugin="${TOKEN_PREFIX_PLUGIN_MAP[${token_prefix}]}"
+    # Check if any secret with this prefix is present (e.g. DISCORD_BOT_TOKEN or DISCORD_BOT_TOKEN_MYBOT)
+    if grep -q "^${token_prefix}" "${env_file}"; then
       # Check if already enabled
       local current
       current="$(jq -r ".plugins.entries.${plugin}.enabled // false" "${config_file}" 2>/dev/null)"
@@ -505,6 +507,73 @@ fi
 
 OPENCLAW_BIN="$(which openclaw)"
 log "openclaw binary: ${OPENCLAW_BIN}"
+
+# ─── 2b. Install GitHub CLI ──────────────────────────────────────────────
+if ! command -v gh &>/dev/null; then
+  log "Installing GitHub CLI…"
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+  chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    > /etc/apt/sources.list.d/github-cli.list
+  apt-get update -qq
+  apt-get install -y -qq gh
+  log "GitHub CLI version: $(gh --version | head -1)"
+fi
+
+# ─── 2c. Configure git + GitHub credentials from secrets ─────────────────
+configure_git_credentials() {
+  local env_file="${SECRETS_ENV}"
+  [[ -f "${env_file}" ]] || return 0
+
+  local github_username github_email github_token
+  github_username="$(grep '^GITHUB_USERNAME=' "${env_file}" | cut -d= -f2-)"
+  github_email="$(grep '^GITHUB_EMAIL=' "${env_file}" | cut -d= -f2-)"
+  github_token="$(grep '^GITHUB_TOKEN=' "${env_file}" | cut -d= -f2-)"
+
+  if [[ -n "${github_username}" ]]; then
+    sudo -u "${OPENCLAW_USER}" git config --global user.name "${github_username}"
+    log "Configured git user.name: ${github_username}"
+  fi
+
+  if [[ -n "${github_email}" ]]; then
+    sudo -u "${OPENCLAW_USER}" git config --global user.email "${github_email}"
+    log "Configured git user.email: ${github_email}"
+  fi
+
+  if [[ -n "${github_token}" ]]; then
+    # Configure gh CLI auth and git credential helper
+    sudo -u "${OPENCLAW_USER}" bash -c "echo '${github_token}' | gh auth login --with-token 2>/dev/null" && \
+      log "Configured gh CLI authentication" || true
+    sudo -u "${OPENCLAW_USER}" git config --global credential.helper '!gh auth git-credential'
+  fi
+}
+configure_git_credentials
+
+# ─── 2d. Seed Claude models in OpenClaw config ───────────────────────────
+seed_claude_models() {
+  local config_file="${OPENCLAW_HOME}/.openclaw/openclaw.json"
+  [[ -f "${config_file}" ]] || return 0
+  command -v jq &>/dev/null || return 0
+
+  # Only seed if models config is empty or missing
+  local existing_models
+  existing_models="$(jq -r '.agents.defaults.models // empty | keys | length' "${config_file}" 2>/dev/null)"
+  if [[ -n "${existing_models}" && "${existing_models}" -gt 1 ]]; then
+    return 0
+  fi
+
+  local tmp="${config_file}.tmp"
+  jq '
+    .agents.defaults.model.primary = "anthropic/claude-haiku-4-5-20251001" |
+    .agents.defaults.models["anthropic/claude-haiku-4-5-20251001"] = {} |
+    .agents.defaults.models["anthropic/claude-sonnet-4-6"] = {} |
+    .agents.defaults.models["anthropic/claude-opus-4-6"] = {}
+  ' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
+  chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${config_file}"
+  log "Seeded Claude models (haiku-4.5 default, sonnet-4.6, opus-4.6)"
+}
+seed_claude_models
 
 # ─── 3. Install the fetch-secrets helper ─────────────────────────────────────
 install_fetch_script
