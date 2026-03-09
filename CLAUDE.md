@@ -240,11 +240,35 @@ sudo -u openclaw openclaw config set \
 Gateway administration (restarts, config changes, secret management) should
 be performed from the CLI on your local machine, not by agents.
 
+### Sandbox GitHub credentials
+
+When `GITHUB_TOKEN`, `GITHUB_USERNAME`, and `GITHUB_EMAIL` secrets are set, the
+startup script writes git/gh credential files to a **tmpfs** (RAM-only) directory
+and bind-mounts them read-only into every sandbox container:
+
+| Host path (tmpfs) | Container path | Purpose |
+|--------------------|----------------|---------|
+| `~/.openclaw/sandbox-git/.gitconfig` | `/.gitconfig` | git user + credential helper |
+| `~/.openclaw/sandbox-git/.git-credentials` | `/.git-credentials` | HTTPS token for git |
+| `~/.openclaw/sandbox-git/git-credential-helper.sh` | `/.git-credential-helper.sh` | Lock-free credential helper |
+| `~/.openclaw/sandbox-git/gh/hosts.yml` | `/.config/gh/hosts.yml` | gh CLI auth |
+
+Env vars `GIT_CONFIG_GLOBAL=/.gitconfig` and `GH_CONFIG_DIR=/.config/gh` are set
+via `agents.defaults.sandbox.docker.env` so tools find the config regardless of
+the container's `HOME` directory.
+
+**Design constraints:**
+- Tokens never written to persistent disk (tmpfs vanishes on power-off)
+- Tokens never appear in agent/LLM context (no env vars with secret values)
+- Bind mounts are read-only — agents cannot modify or exfiltrate credentials
+- Credential helper reads from file without lockfiles (works on read-only fs)
+
 ### Credential isolation on the VM
 
 | Path | Protection |
 |------|-----------|
 | `/run/openclaw/env` | tmpfs — secrets exist only in RAM |
+| `~/.openclaw/sandbox-git/` | tmpfs — git/gh credentials in RAM only |
 | `~/.openclaw/credentials/` | Restricted permissions (persists device tokens) |
 | `~/.openclaw/.env` | Symlinked to `/dev/null` |
 
