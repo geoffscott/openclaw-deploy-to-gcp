@@ -330,6 +330,81 @@ gcloud compute ssh iap-vps --zone=us-central1-a \
   -- sudo systemctl status openclaw-gateway
 ```
 
+## Upgrading
+
+### Incremental upgrades (automatic on every reboot)
+
+The startup script's "already provisioned" fast path runs on every reboot and
+handles additive changes without touching existing config:
+
+- Installs missing skill dependency packages (`ripgrep`, `tmux`, `ffmpeg`)
+- Installs missing npm skill CLIs (`clawhub`)
+- Rebuilds the sandbox Docker image if it's missing Node.js or other tools
+- Ensures `skills.load.watch = true` for skill hot-reload
+
+To deploy startup script changes, update the VM metadata and reboot:
+
+```bash
+gcloud compute instances add-metadata iap-vps --zone=us-central1-a \
+  --project="${GCP_PROJECT_ID}" \
+  --metadata-from-file=startup-script=startup.sh
+
+gcloud compute instances reset iap-vps --zone=us-central1-a \
+  --project="${GCP_PROJECT_ID}"
+```
+
+### OpenClaw version upgrade (opt-in)
+
+OpenClaw is **not** upgraded automatically. To upgrade, set the metadata flag
+before rebooting:
+
+```bash
+# 1. Set the upgrade flag
+gcloud compute instances add-metadata iap-vps --zone=us-central1-a \
+  --project="${GCP_PROJECT_ID}" --metadata=openclaw-upgrade=true
+
+# 2. Reboot to trigger the upgrade
+gcloud compute instances reset iap-vps --zone=us-central1-a \
+  --project="${GCP_PROJECT_ID}"
+```
+
+On reboot, the startup script will:
+
+1. Run `npm install -g openclaw@latest`
+2. Reinstall `discord.js` into the new package
+3. Run `openclaw doctor --fix` to handle config schema changes
+4. Clear the `openclaw-upgrade` metadata flag
+5. Log old and new versions for audit
+
+Check the upgrade completed:
+
+```bash
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- 'sudo journalctl -t openclaw-startup --boot --no-pager | grep -i upgrade'
+```
+
+**Why opt-in?** OpenClaw's config schema evolves rapidly. An automatic upgrade
+could introduce unrecognized config keys that crash the gateway. The opt-in flag
+ensures you can check release notes first and the `doctor --fix` step handles
+any schema migrations.
+
+### Bundled skills
+
+The startup script installs dependencies for Linux-compatible bundled skills.
+Skills become ready based on what's installed:
+
+| Category | Count | Notes |
+|----------|-------|-------|
+| Ready out of the box | ~10 | weather, github, gh-issues, healthcheck, skill-creator, session-logs, tmux, video-frames, clawhub, todo |
+| Ready when configured | ~6 | discord, slack, trello, notion, openai-image-gen, openai-whisper-api — need API keys or channel config |
+| macOS-only | 7 | apple-notes, bear-notes, imsg, etc. — will never work on Linux |
+| Specialty/hardware | ~19 | 1password, openhue, sonos, etc. — install manually if needed |
+
+Agents can develop and hot-reload their own skills via `skills.load.watch = true`
+and write to their workspace's `skills/` directory. The `skill-creator` bundled
+skill teaches agents the SKILL.md format.
+
 ## Cleanup
 
 ```bash
