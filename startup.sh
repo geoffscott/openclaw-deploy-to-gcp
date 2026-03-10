@@ -657,6 +657,12 @@ SANDBOX_DOCKERFILE
   configure_sandbox_git_binds
   ensure_skills_config
 
+  # ── Remove stale sandbox containers (created before reboot, bind mounts invalid) ─
+  if docker ps -a --filter name=openclaw-sbx -q 2>/dev/null | grep -q .; then
+    log "Removing stale sandbox containers…"
+    docker rm -f $(docker ps -a --filter name=openclaw-sbx -q) 2>/dev/null || true
+  fi
+
   # Always restart so ExecStartPre re-fetches secrets with the updated helper
   systemctl restart openclaw-gateway.service 2>/dev/null || true
 
