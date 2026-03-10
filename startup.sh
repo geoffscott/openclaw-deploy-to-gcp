@@ -340,6 +340,133 @@ restrict_metadata_access() {
 }
 restrict_metadata_access
 
+# ─── Reusable functions (called from both fast path and first-provision) ───────
+
+# Configure git + GitHub credentials from secrets (tmpfs — must run every boot)
+configure_git_credentials() {
+  local env_file="${SECRETS_ENV}"
+  [[ -f "${env_file}" ]] || return 0
+
+  local github_username github_email github_token
+  github_username="$(grep '^GITHUB_USERNAME=' "${env_file}" | cut -d= -f2-)"
+  github_email="$(grep '^GITHUB_EMAIL=' "${env_file}" | cut -d= -f2-)"
+  github_token="$(grep '^GITHUB_TOKEN=' "${env_file}" | cut -d= -f2-)"
+
+  if [[ -n "${github_username}" ]]; then
+    sudo -u "${OPENCLAW_USER}" git config --global user.name "${github_username}"
+    log "Configured git user.name: ${github_username}"
+  fi
+
+  if [[ -n "${github_email}" ]]; then
+    sudo -u "${OPENCLAW_USER}" git config --global user.email "${github_email}"
+    log "Configured git user.email: ${github_email}"
+  fi
+
+  if [[ -n "${github_token}" ]]; then
+    # Configure gh CLI auth and git credential helper
+    sudo -u "${OPENCLAW_USER}" bash -c "echo '${github_token}' | gh auth login --with-token 2>/dev/null" && \
+      log "Configured gh CLI authentication" || true
+    sudo -u "${OPENCLAW_USER}" git config --global credential.helper '!gh auth git-credential'
+
+    # Write sandbox git credentials to tmpfs (RAM only — never on disk)
+    # These are bind-mounted into sandbox containers so agents can use git/gh
+    # Tokens are never set as env vars to prevent leaking into LLM context
+    local sandbox_creds_dir="${OPENCLAW_HOME}/.openclaw/sandbox-git"
+    mkdir -p "${sandbox_creds_dir}"
+    mount -t tmpfs -o "size=1m,mode=700,uid=$(id -u "${OPENCLAW_USER}"),gid=$(id -g "${OPENCLAW_USER}")" \
+      tmpfs "${sandbox_creds_dir}" 2>/dev/null || true
+
+    # Git config — points to lock-free credential helper script
+    cat > "${sandbox_creds_dir}/.gitconfig" <<GITCFG
+[user]
+    name = ${github_username}
+    email = ${github_email}
+[credential]
+    helper = /.git-credential-helper.sh
+GITCFG
+
+    # Credential file (read by helper script)
+    echo "https://${github_username}:${github_token}@github.com" \
+      > "${sandbox_creds_dir}/.git-credentials"
+
+    # Lock-free credential helper — reads .git-credentials without lockfiles
+    cat > "${sandbox_creds_dir}/git-credential-helper.sh" <<'HELPERSCRIPT'
+#!/bin/sh
+while IFS= read -r line; do
+  proto=$(echo "$line" | sed -n 's|^\(https\?\)://.*|\1|p')
+  user=$(echo "$line" | sed -n 's|.*://\([^:]*\):.*@.*|\1|p')
+  pass=$(echo "$line" | sed -n 's|.*://[^:]*:\(.*\)@.*|\1|p')
+  host=$(echo "$line" | sed -n 's|.*@\(.*\)|\1|p')
+  echo "protocol=$proto"
+  echo "host=$host"
+  echo "username=$user"
+  echo "password=$pass"
+  echo
+done < /.git-credentials
+HELPERSCRIPT
+    chmod 755 "${sandbox_creds_dir}/git-credential-helper.sh"
+
+    # gh CLI host config
+    local sandbox_gh_dir="${sandbox_creds_dir}/gh"
+    mkdir -p "${sandbox_gh_dir}"
+    cat > "${sandbox_gh_dir}/hosts.yml" <<GHCFG
+github.com:
+    oauth_token: ${github_token}
+    user: ${github_username}
+    git_protocol: https
+GHCFG
+
+    chmod 600 "${sandbox_creds_dir}/.git-credentials"
+    chmod 644 "${sandbox_creds_dir}/.gitconfig"
+    chmod 600 "${sandbox_gh_dir}/hosts.yml"
+    chown -R "${OPENCLAW_USER}:${OPENCLAW_USER}" "${sandbox_creds_dir}"
+
+    log "Wrote sandbox git/gh credentials to tmpfs (${sandbox_creds_dir})"
+  fi
+}
+
+# Bind-mount tmpfs git credentials into sandbox containers
+configure_sandbox_git_binds() {
+  local sandbox_creds="${OPENCLAW_HOME}/.openclaw/sandbox-git"
+  [[ -f "${sandbox_creds}/.git-credentials" ]] || return 0
+
+  local config_file="${OPENCLAW_HOME}/.openclaw/openclaw.json"
+  [[ -f "${config_file}" ]] || return 0
+
+  local tmp="${config_file}.tmp"
+  jq --arg creds "${sandbox_creds}" '
+    .agents.defaults.sandbox.docker.binds = [
+      ($creds + "/.gitconfig:/.gitconfig:ro"),
+      ($creds + "/.git-credentials:/.git-credentials:ro"),
+      ($creds + "/git-credential-helper.sh:/.git-credential-helper.sh:ro"),
+      ($creds + "/gh:/.config/gh:rw")
+    ] |
+    .agents.defaults.sandbox.docker.env = {
+      "GIT_CONFIG_GLOBAL": "/.gitconfig",
+      "GH_CONFIG_DIR": "/.config/gh"
+    }
+  ' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
+  chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${config_file}"
+  log "Configured sandbox git credential bind mounts (tmpfs → container)"
+}
+
+# Ensure skills.load.watch is set (additive, safe to re-run)
+ensure_skills_config() {
+  local config_file="${OPENCLAW_HOME}/.openclaw/openclaw.json"
+  [[ -f "${config_file}" ]] || return 0
+  command -v jq &>/dev/null || return 0
+
+  local watch
+  watch="$(jq -r '.skills.load.watch // false' "${config_file}" 2>/dev/null)"
+
+  if [[ "${watch}" != "true" ]]; then
+    local tmp="${config_file}.tmp"
+    jq '.skills.load.watch = true' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
+    chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${config_file}"
+    log "Enabled skills.load.watch for hot-reload"
+  fi
+}
+
 # ─── Already provisioned? Run incremental upgrades then ensure service runs ───
 if [ -f "${SENTINEL_FILE}" ]; then
   log "Already provisioned. Running incremental upgrades…"
@@ -524,6 +651,12 @@ SANDBOX_DOCKERFILE
   if [ "${NEEDS_RELOAD}" = true ]; then
     systemctl daemon-reload
   fi
+
+  # ── Re-create tmpfs git credentials and bind mounts (wiped on reboot) ───
+  configure_git_credentials
+  configure_sandbox_git_binds
+  ensure_skills_config
+
   # Always restart so ExecStartPre re-fetches secrets with the updated helper
   systemctl restart openclaw-gateway.service 2>/dev/null || true
 
@@ -705,88 +838,8 @@ if ! command -v gh &>/dev/null; then
 fi
 
 # ─── 2c. Configure git + GitHub credentials from secrets ─────────────────
-configure_git_credentials() {
-  local env_file="${SECRETS_ENV}"
-  [[ -f "${env_file}" ]] || return 0
-
-  local github_username github_email github_token
-  github_username="$(grep '^GITHUB_USERNAME=' "${env_file}" | cut -d= -f2-)"
-  github_email="$(grep '^GITHUB_EMAIL=' "${env_file}" | cut -d= -f2-)"
-  github_token="$(grep '^GITHUB_TOKEN=' "${env_file}" | cut -d= -f2-)"
-
-  if [[ -n "${github_username}" ]]; then
-    sudo -u "${OPENCLAW_USER}" git config --global user.name "${github_username}"
-    log "Configured git user.name: ${github_username}"
-  fi
-
-  if [[ -n "${github_email}" ]]; then
-    sudo -u "${OPENCLAW_USER}" git config --global user.email "${github_email}"
-    log "Configured git user.email: ${github_email}"
-  fi
-
-  if [[ -n "${github_token}" ]]; then
-    # Configure gh CLI auth and git credential helper
-    sudo -u "${OPENCLAW_USER}" bash -c "echo '${github_token}' | gh auth login --with-token 2>/dev/null" && \
-      log "Configured gh CLI authentication" || true
-    sudo -u "${OPENCLAW_USER}" git config --global credential.helper '!gh auth git-credential'
-
-    # Write sandbox git credentials to tmpfs (RAM only — never on disk)
-    # These are bind-mounted into sandbox containers so agents can use git/gh
-    # Tokens are never set as env vars to prevent leaking into LLM context
-    local sandbox_creds_dir="${OPENCLAW_HOME}/.openclaw/sandbox-git"
-    mkdir -p "${sandbox_creds_dir}"
-    mount -t tmpfs -o "size=1m,mode=700,uid=$(id -u "${OPENCLAW_USER}"),gid=$(id -g "${OPENCLAW_USER}")" \
-      tmpfs "${sandbox_creds_dir}" 2>/dev/null || true
-
-    # Git config — points to lock-free credential helper script
-    cat > "${sandbox_creds_dir}/.gitconfig" <<GITCFG
-[user]
-    name = ${github_username}
-    email = ${github_email}
-[credential]
-    helper = /.git-credential-helper.sh
-GITCFG
-
-    # Credential file (read by helper script)
-    echo "https://${github_username}:${github_token}@github.com" \
-      > "${sandbox_creds_dir}/.git-credentials"
-
-    # Lock-free credential helper — reads .git-credentials without lockfiles
-    cat > "${sandbox_creds_dir}/git-credential-helper.sh" <<'HELPERSCRIPT'
-#!/bin/sh
-while IFS= read -r line; do
-  proto=$(echo "$line" | sed -n 's|^\(https\?\)://.*|\1|p')
-  user=$(echo "$line" | sed -n 's|.*://\([^:]*\):.*@.*|\1|p')
-  pass=$(echo "$line" | sed -n 's|.*://[^:]*:\(.*\)@.*|\1|p')
-  host=$(echo "$line" | sed -n 's|.*@\(.*\)|\1|p')
-  echo "protocol=$proto"
-  echo "host=$host"
-  echo "username=$user"
-  echo "password=$pass"
-  echo
-done < /.git-credentials
-HELPERSCRIPT
-    chmod 755 "${sandbox_creds_dir}/git-credential-helper.sh"
-
-    # gh CLI host config
-    local sandbox_gh_dir="${sandbox_creds_dir}/gh"
-    mkdir -p "${sandbox_gh_dir}"
-    cat > "${sandbox_gh_dir}/hosts.yml" <<GHCFG
-github.com:
-    oauth_token: ${github_token}
-    user: ${github_username}
-    git_protocol: https
-GHCFG
-
-    chmod 600 "${sandbox_creds_dir}/.git-credentials"
-    chmod 644 "${sandbox_creds_dir}/.gitconfig"
-    chmod 600 "${sandbox_gh_dir}/hosts.yml"
-    chown -R "${OPENCLAW_USER}:${OPENCLAW_USER}" "${sandbox_creds_dir}"
-
-    log "Wrote sandbox git/gh credentials to tmpfs (${sandbox_creds_dir})"
-  fi
-}
 configure_git_credentials
+configure_sandbox_git_binds
 
 # ─── 2d. Seed Claude models in OpenClaw config ───────────────────────────
 seed_claude_models() {
@@ -817,53 +870,7 @@ seed_claude_models() {
   log "Seeded Claude models (haiku-4.5 default, sonnet-4.6, opus-4.6) with sandbox enabled"
 }
 seed_claude_models
-
-# ─── 2d-2. Ensure skills config is set (additive, safe to re-run) ────────
-ensure_skills_config() {
-  local config_file="${OPENCLAW_HOME}/.openclaw/openclaw.json"
-  [[ -f "${config_file}" ]] || return 0
-  command -v jq &>/dev/null || return 0
-
-  local watch
-  watch="$(jq -r '.skills.load.watch // false' "${config_file}" 2>/dev/null)"
-
-  if [[ "${watch}" != "true" ]]; then
-    local tmp="${config_file}.tmp"
-    jq '.skills.load.watch = true' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
-    chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${config_file}"
-    log "Enabled skills.load.watch for hot-reload"
-  fi
-}
 ensure_skills_config
-
-# ─── 2e. Bind-mount tmpfs git credentials into sandbox containers ─────────
-# If GitHub credentials were written to tmpfs, configure sandbox bind mounts
-# so agents can use git/gh inside their containers. Secrets stay in RAM.
-# Tokens never appear as env vars (would leak into LLM context).
-configure_sandbox_git_binds() {
-  local sandbox_creds="${OPENCLAW_HOME}/.openclaw/sandbox-git"
-  [[ -f "${sandbox_creds}/.git-credentials" ]] || return 0
-
-  local config_file="${OPENCLAW_HOME}/.openclaw/openclaw.json"
-  [[ -f "${config_file}" ]] || return 0
-
-  local tmp="${config_file}.tmp"
-  jq --arg creds "${sandbox_creds}" '
-    .agents.defaults.sandbox.docker.binds = [
-      ($creds + "/.gitconfig:/.gitconfig:ro"),
-      ($creds + "/.git-credentials:/.git-credentials:ro"),
-      ($creds + "/git-credential-helper.sh:/.git-credential-helper.sh:ro"),
-      ($creds + "/gh:/.config/gh:rw")
-    ] |
-    .agents.defaults.sandbox.docker.env = {
-      "GIT_CONFIG_GLOBAL": "/.gitconfig",
-      "GH_CONFIG_DIR": "/.config/gh"
-    }
-  ' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
-  chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${config_file}"
-  log "Configured sandbox git credential bind mounts (tmpfs → container)"
-}
-configure_sandbox_git_binds
 
 # ─── 3. Install the fetch-secrets helper ─────────────────────────────────────
 install_fetch_script
