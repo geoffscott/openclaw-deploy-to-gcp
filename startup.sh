@@ -340,12 +340,131 @@ restrict_metadata_access() {
 }
 restrict_metadata_access
 
-# ─── Already provisioned? Just ensure the service is running ─────────────────
+# ─── Already provisioned? Run incremental upgrades then ensure service runs ───
 if [ -f "${SENTINEL_FILE}" ]; then
-  log "Already provisioned. Ensuring service is running."
+  log "Already provisioned. Running incremental upgrades…"
 
   # Always update the fetch-secrets helper so fixes propagate on reboot
   install_fetch_script
+
+  # ── Opt-in OpenClaw upgrade via instance metadata flag ──────────────────
+  # Set the flag before rebooting:
+  #   gcloud compute instances add-metadata iap-vps --zone=us-central1-a \
+  #     --project=PROJECT --metadata=openclaw-upgrade=true
+  # The flag is cleared after a successful upgrade.
+  UPGRADE_FLAG="$(curl -sf -H "${METADATA_HEADER}" \
+    "${METADATA_URL}/instance/attributes/openclaw-upgrade" 2>/dev/null || echo "")"
+  if [[ "${UPGRADE_FLAG}" == "true" ]]; then
+    CURRENT_VER="$(openclaw --version 2>/dev/null || echo "unknown")"
+    log "OpenClaw upgrade requested (current: ${CURRENT_VER}). Upgrading…"
+    if npm install -g openclaw@latest 2>&1; then
+      NEW_VER="$(openclaw --version 2>/dev/null || echo "unknown")"
+      log "OpenClaw upgraded: ${CURRENT_VER} → ${NEW_VER}"
+
+      # Update discord.js in case the new version needs it
+      OPENCLAW_PKG_DIR="$(npm root -g)/openclaw"
+      if [[ -d "${OPENCLAW_PKG_DIR}" ]]; then
+        npm install --prefix "${OPENCLAW_PKG_DIR}" discord.js 2>/dev/null || true
+      fi
+
+      # Clear the flag so it doesn't re-run on next reboot
+      # Requires: instance metadata write access (compute.instances.setMetadata)
+      UPG_PROJECT="$(curl -sf -H "${METADATA_HEADER}" \
+        "${METADATA_URL}/project/project-id" 2>/dev/null)" || true
+      UPG_ZONE="$(curl -sf -H "${METADATA_HEADER}" \
+        "${METADATA_URL}/instance/zone" 2>/dev/null | sed 's|.*/||')" || true
+      UPG_INSTANCE="$(curl -sf -H "${METADATA_HEADER}" \
+        "${METADATA_URL}/instance/name" 2>/dev/null)" || true
+      if [[ -n "${UPG_PROJECT}" && -n "${UPG_ZONE}" && -n "${UPG_INSTANCE}" ]]; then
+        UPG_TOKEN="$(curl -sf -H "${METADATA_HEADER}" \
+          "${METADATA_URL}/instance/service-accounts/default/token" 2>/dev/null \
+          | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')" || true
+        if [[ -n "${UPG_TOKEN}" ]]; then
+          UPG_META="$(curl -sf -H "Authorization: Bearer ${UPG_TOKEN}" \
+            "https://compute.googleapis.com/compute/v1/projects/${UPG_PROJECT}/zones/${UPG_ZONE}/instances/${UPG_INSTANCE}" 2>/dev/null)"
+          UPG_FP="$(echo "${UPG_META}" | jq -r '.metadata.fingerprint // empty' 2>/dev/null)"
+          UPG_ITEMS="$(echo "${UPG_META}" | jq '[.metadata.items[]? | select(.key != "openclaw-upgrade")]' 2>/dev/null)"
+          if [[ -n "${UPG_FP}" ]]; then
+            curl -sf -X POST \
+              -H "Authorization: Bearer ${UPG_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "https://compute.googleapis.com/compute/v1/projects/${UPG_PROJECT}/zones/${UPG_ZONE}/instances/${UPG_INSTANCE}/setMetadata" \
+              -d "{\"fingerprint\":\"${UPG_FP}\",\"items\":${UPG_ITEMS}}" 2>/dev/null \
+              && log "Cleared openclaw-upgrade metadata flag" \
+              || log "WARNING: Could not clear openclaw-upgrade flag — remove it manually"
+          fi
+        fi
+      fi
+
+      # Run openclaw doctor to check for config breaking changes
+      sudo -u "${OPENCLAW_USER}" openclaw doctor --fix 2>&1 | while IFS= read -r line; do
+        log "doctor: ${line}"
+      done || true
+    else
+      log "WARNING: OpenClaw upgrade failed — continuing with current version"
+    fi
+  fi
+
+  # ── Incremental: install missing skill dependency packages ──────────────
+  SKILL_DEPS=(ripgrep tmux ffmpeg)
+  MISSING_DEPS=()
+  for pkg in "${SKILL_DEPS[@]}"; do
+    dpkg -s "${pkg}" &>/dev/null || MISSING_DEPS+=("${pkg}")
+  done
+  if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
+    log "Installing skill dependencies: ${MISSING_DEPS[*]}"
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${MISSING_DEPS[@]}"
+  fi
+
+  # ── Incremental: install missing npm-based skill CLIs ───────────────────
+  for cli in clawhub; do
+    command -v "${cli}" &>/dev/null || npm install -g "${cli}" 2>/dev/null || true
+  done
+
+  # ── Incremental: rebuild sandbox image if missing new tools ─────────────
+  if docker image inspect openclaw-sandbox:bookworm-slim &>/dev/null \
+     && ! docker run --rm openclaw-sandbox:bookworm-slim which node &>/dev/null; then
+    log "Rebuilding sandbox image (adding Node.js, skill tools)…"
+    docker build -t openclaw-sandbox:bookworm-slim - <<'SANDBOX_DOCKERFILE'
+FROM debian:bookworm-slim
+RUN apt-get update -qq && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+      curl wget git jq python3 ca-certificates gnupg \
+      ripgrep tmux ffmpeg && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/gh.gpg && \
+    chmod a+r /etc/apt/keyrings/gh.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/gh.gpg] \
+      https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update -qq && \
+    apt-get install -y -qq gh && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y -qq nodejs && \
+    npm install -g clawhub && \
+    rm -rf /var/lib/apt/lists/*
+SANDBOX_DOCKERFILE
+    log "Sandbox image rebuilt"
+    # Recreate running sandbox containers so they pick up the new image
+    if command -v openclaw &>/dev/null; then
+      sudo -u "${OPENCLAW_USER}" openclaw sandbox recreate --all --force 2>/dev/null || true
+    fi
+  fi
+
+  # ── Incremental: ensure skills.load.watch is set ─────────────────────────
+  CONFIG_FILE="${OPENCLAW_HOME}/.openclaw/openclaw.json"
+  if [[ -f "${CONFIG_FILE}" ]] && command -v jq &>/dev/null; then
+    SKILLS_WATCH="$(jq -r '.skills.load.watch // false' "${CONFIG_FILE}" 2>/dev/null)"
+    if [[ "${SKILLS_WATCH}" != "true" ]]; then
+      TMP="${CONFIG_FILE}.tmp"
+      jq '.skills.load.watch = true' "${CONFIG_FILE}" > "${TMP}" && mv "${TMP}" "${CONFIG_FILE}"
+      chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${CONFIG_FILE}"
+      log "Enabled skills.load.watch for hot-reload"
+    fi
+  fi
 
   # Ensure discord.js is installed (may be missing on older provisions)
   OPENCLAW_PKG_DIR="$(npm root -g)/openclaw"
@@ -419,7 +538,7 @@ if ! command -v node &>/dev/null || [ "$(node --version | cut -d. -f1 | tr -d v)
   log "Installing Node.js ${NODE_MAJOR}…"
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl gnupg git jq iptables-persistent \
-    build-essential libopus-dev python3
+    build-essential libopus-dev python3 ripgrep tmux ffmpeg
   mkdir -p /etc/apt/keyrings
   curl -fsSL "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key" \
     | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
@@ -510,13 +629,15 @@ fi
 # This replaces the default openclaw-sandbox:bookworm-slim tag so OpenClaw
 # picks it up automatically — no setupCommand needed.
 if ! docker image inspect openclaw-sandbox:bookworm-slim &>/dev/null \
-   || ! docker run --rm openclaw-sandbox:bookworm-slim which git &>/dev/null; then
+   || ! docker run --rm openclaw-sandbox:bookworm-slim which git &>/dev/null \
+   || ! docker run --rm openclaw-sandbox:bookworm-slim which node &>/dev/null; then
   log "Building sandbox image with dev tools…"
   docker build -t openclaw-sandbox:bookworm-slim - <<'SANDBOX_DOCKERFILE'
 FROM debian:bookworm-slim
 RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-      curl wget git jq python3 ca-certificates gnupg && \
+      curl wget git jq python3 ca-certificates gnupg \
+      ripgrep tmux ffmpeg && \
     install -m 0755 -d /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /etc/apt/keyrings/gh.gpg && \
@@ -526,6 +647,10 @@ RUN apt-get update -qq && \
       > /etc/apt/sources.list.d/github-cli.list && \
     apt-get update -qq && \
     apt-get install -y -qq gh && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y -qq nodejs && \
+    npm install -g clawhub && \
     rm -rf /var/lib/apt/lists/*
 SANDBOX_DOCKERFILE
   log "Sandbox image built: $(docker images openclaw-sandbox:bookworm-slim --format '{{.ID}}')"
@@ -544,10 +669,29 @@ if [[ -d "${OPENCLAW_PKG_DIR}" ]] && [[ ! -d "${OPENCLAW_PKG_DIR}/node_modules/d
   npm install --prefix "${OPENCLAW_PKG_DIR}" discord.js
 fi
 
+# Install npm-based skill CLIs globally (makes skills "ready" on host)
+for cli in clawhub; do
+  command -v "${cli}" &>/dev/null || npm install -g "${cli}" 2>/dev/null || true
+done
+
 OPENCLAW_BIN="$(which openclaw)"
 log "openclaw binary: ${OPENCLAW_BIN}"
 
 # ─── 2b. Install GitHub CLI ──────────────────────────────────────────────
+# ─── 2b-2. Install skill dependency binaries on host ────────────────────
+# OpenClaw checks requires.bins on the HOST at skill load time.
+# Binaries here make bundled skills show as "ready".
+SKILL_DEPS=(ripgrep tmux ffmpeg)
+MISSING_DEPS=()
+for pkg in "${SKILL_DEPS[@]}"; do
+  dpkg -s "${pkg}" &>/dev/null || MISSING_DEPS+=("${pkg}")
+done
+if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
+  log "Installing skill dependencies: ${MISSING_DEPS[*]}"
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${MISSING_DEPS[@]}"
+fi
+
 if ! command -v gh &>/dev/null; then
   log "Installing GitHub CLI…"
   curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -665,6 +809,7 @@ seed_claude_models() {
     .agents.defaults.models["anthropic/claude-opus-4-6"] = {} |
     .agents.defaults.sandbox.mode = "all" |
     .agents.defaults.sandbox.docker.network = "bridge" |
+    .agents.defaults.sandbox.workspaceAccess = "rw" |
     .tools.elevated.enabled = false |
     .tools.fs.workspaceOnly = true
   ' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
@@ -672,6 +817,24 @@ seed_claude_models() {
   log "Seeded Claude models (haiku-4.5 default, sonnet-4.6, opus-4.6) with sandbox enabled"
 }
 seed_claude_models
+
+# ─── 2d-2. Ensure skills config is set (additive, safe to re-run) ────────
+ensure_skills_config() {
+  local config_file="${OPENCLAW_HOME}/.openclaw/openclaw.json"
+  [[ -f "${config_file}" ]] || return 0
+  command -v jq &>/dev/null || return 0
+
+  local watch
+  watch="$(jq -r '.skills.load.watch // false' "${config_file}" 2>/dev/null)"
+
+  if [[ "${watch}" != "true" ]]; then
+    local tmp="${config_file}.tmp"
+    jq '.skills.load.watch = true' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
+    chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${config_file}"
+    log "Enabled skills.load.watch for hot-reload"
+  fi
+}
+ensure_skills_config
 
 # ─── 2e. Bind-mount tmpfs git credentials into sandbox containers ─────────
 # If GitHub credentials were written to tmpfs, configure sandbox bind mounts
