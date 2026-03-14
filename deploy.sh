@@ -549,6 +549,29 @@ if ! gcloud compute routers nats describe "${NAT_NAME}" \
 fi
 echo "  ✓ Cloud NAT configured"
 
+# ─── Disk snapshot schedule: daily backups ───────────────────────────────────
+SNAPSHOT_SCHEDULE="${INSTANCE_NAME}-daily-backup"
+
+echo ""
+echo "▶ Configuring daily disk snapshot schedule '${SNAPSHOT_SCHEDULE}'…"
+
+if gcloud compute resource-policies describe "${SNAPSHOT_SCHEDULE}" \
+     --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+  echo "  Snapshot schedule already exists — skipping."
+else
+  gcloud compute resource-policies create snapshot-schedule "${SNAPSHOT_SCHEDULE}" \
+    --project="${PROJECT_ID}" \
+    --region="${REGION}" \
+    --max-retention-days=7 \
+    --on-source-disk-delete=apply-retention-policy \
+    --daily-schedule \
+    --start-time="04:00" \
+    --storage-location="${REGION}" \
+    --description="Daily backup of ${INSTANCE_NAME} boot disk (7-day retention)" \
+    --quiet
+  echo "  ✓ Snapshot schedule created (daily at 04:00 UTC, 7-day retention)"
+fi
+
 # ─── Create VM instance ───────────────────────────────────────────────────────
 echo ""
 echo "▶ Creating VM instance '${INSTANCE_NAME}'…"
@@ -617,6 +640,31 @@ else
     --quiet
 fi
 echo "  ✓ Instance ready"
+
+# ─── Attach snapshot schedule to boot disk ────────────────────────────────────
+echo ""
+echo "▶ Attaching snapshot schedule to boot disk…"
+
+# The boot disk has the same name as the instance
+BOOT_DISK="${INSTANCE_NAME}"
+
+# Check if the schedule is already attached
+ATTACHED_POLICIES="$(gcloud compute disks describe "${BOOT_DISK}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --format="value(resourcePolicies)" 2>/dev/null)" || ATTACHED_POLICIES=""
+
+if echo "${ATTACHED_POLICIES}" | grep -q "${SNAPSHOT_SCHEDULE}"; then
+  echo "  Snapshot schedule already attached — skipping."
+else
+  if gcloud compute disks add-resource-policies "${BOOT_DISK}" \
+       --zone="${ZONE}" --project="${PROJECT_ID}" \
+       --resource-policies="${SNAPSHOT_SCHEDULE}" \
+       --quiet 2>/dev/null; then
+    echo "  ✓ Snapshot schedule attached to boot disk"
+  else
+    echo "  ⚠  Could not attach snapshot schedule (may need compute.disks.addResourcePolicies permission)"
+  fi
+fi
 
 # ─── Grant current user IAP-tunnelled SSH access ─────────────────────────────
 echo ""

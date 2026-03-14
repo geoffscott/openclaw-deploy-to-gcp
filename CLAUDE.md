@@ -405,11 +405,59 @@ Agents can develop and hot-reload their own skills via `skills.load.watch = true
 and write to their workspace's `skills/` directory. The `skill-creator` bundled
 skill teaches agents the SKILL.md format.
 
+## Automated Backups
+
+`deploy.sh` creates a GCP disk snapshot schedule that automatically backs up the
+VM's boot disk daily. This protects against data loss for everything on persistent
+disk: OpenClaw config, agent workspaces, conversation history, custom skills, and
+device tokens.
+
+| Setting | Value |
+|---------|-------|
+| Schedule name | `iap-vps-daily-backup` |
+| Frequency | Daily at 04:00 UTC |
+| Retention | 7 days (rolling) |
+| Storage location | Same region as the VM |
+| On disk delete | Apply retention policy (snapshots kept until they age out) |
+
+Snapshots are incremental — only the first is a full copy; subsequent snapshots
+store only changed blocks, keeping costs low.
+
+### Viewing snapshots
+
+```bash
+gcloud compute snapshots list --project="${GCP_PROJECT_ID}" \
+  --filter="sourceDisk~iap-vps" --format="table(name,creationTimestamp,diskSizeGb,status)"
+```
+
+### Restoring from a snapshot
+
+```bash
+# 1. Create a new disk from the snapshot
+gcloud compute disks create iap-vps-restored \
+  --zone=us-central1-a --project="${GCP_PROJECT_ID}" \
+  --source-snapshot=SNAPSHOT_NAME
+
+# 2. Stop the VM, detach old disk, attach restored disk
+gcloud compute instances stop iap-vps --zone=us-central1-a --project="${GCP_PROJECT_ID}"
+gcloud compute instances detach-disk iap-vps --disk=iap-vps --zone=us-central1-a --project="${GCP_PROJECT_ID}"
+gcloud compute instances attach-disk iap-vps --disk=iap-vps-restored --zone=us-central1-a --project="${GCP_PROJECT_ID}" --boot
+gcloud compute instances start iap-vps --zone=us-central1-a --project="${GCP_PROJECT_ID}"
+```
+
+### What is NOT on the disk (already durable elsewhere)
+
+- Secrets — stored in GCP Secret Manager
+- Git repositories — stored on GitHub
+- Git/GH credentials — recreated from Secret Manager on every boot (tmpfs)
+
 ## Cleanup
 
 ```bash
 gcloud compute instances delete iap-vps --zone=us-central1-a \
   --project="${GCP_PROJECT_ID}" --quiet
+gcloud compute resource-policies delete iap-vps-daily-backup \
+  --region=us-central1 --project="${GCP_PROJECT_ID}" --quiet
 gcloud compute firewall-rules delete allow-iap-ssh allow-iap-ssh-deny-public iap-vps-deny-openclaw-port \
   --project="${GCP_PROJECT_ID}" --quiet
 gcloud compute routers nats delete iap-vps-nat \
