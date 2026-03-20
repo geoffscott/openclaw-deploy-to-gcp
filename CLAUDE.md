@@ -201,6 +201,49 @@ sudo -u openclaw openclaw config set agents.defaults.model.primary \
 # Change for a specific agent (via the web UI or config)
 ```
 
+### Heartbeats
+
+The gateway periodically wakes each agent and feeds it the contents of its
+`HEARTBEAT.md` file. If nothing needs attention the agent replies `HEARTBEAT_OK`
+(suppressed from the channel). Otherwise it replies with an alert.
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| `agents.defaults.heartbeat.every` | `30m` | How often agents are polled |
+| `agents.defaults.heartbeat.target` | `discord` | Channel type for heartbeat delivery |
+| `agents.defaults.heartbeat.to` | *(unset — uses last channel)* | Specific channel ID to deliver to |
+
+By default, heartbeats are delivered to the last Discord channel the agent
+interacted on. To pin an agent's heartbeat to a specific channel, set the `to`
+field to a Discord channel ID.
+
+**Getting a Discord channel ID:** In Discord, enable Developer Mode (User
+Settings → Advanced → Developer Mode), then right-click any channel and select
+"Copy Channel ID".
+
+```bash
+# Pin agent's heartbeat to a specific Discord channel
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo -u openclaw openclaw config set \
+  'agents.list[INDEX].heartbeat.to' '"DISCORD_CHANNEL_ID"'
+
+# Change heartbeat interval for a specific agent
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo -u openclaw openclaw config set \
+  'agents.list[INDEX].heartbeat.every' '10m'
+
+# Restart to apply
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo systemctl restart openclaw-gateway
+```
+
+Agents control **what** gets checked by editing their `HEARTBEAT.md` in
+`/workspace/HEARTBEAT.md` (inside the sandbox). The gateway controls **when**
+and **where** the heartbeat is delivered.
+
 ### Agent sandboxing
 
 By default, agents are provisioned with sandbox mode enabled and restricted
@@ -214,9 +257,10 @@ tool access:
 | `tools.fs.workspaceOnly` | `true` | Filesystem access limited to agent workspace |
 
 The startup script builds a custom `openclaw-sandbox:bookworm-slim` Docker image
-with common dev tools pre-installed: `curl`, `wget`, `git`, `jq`, `python3`, and
-`gh` (GitHub CLI). To customise the image, edit the `SANDBOX_DOCKERFILE` heredoc
-in `startup.sh` and rebuild:
+with common dev tools pre-installed: `curl`, `wget`, `git`, `jq`, `python3`,
+`gh` (GitHub CLI), and PDF libraries (`PyPDF2`, `pdfrw`, `reportlab`). To
+customise the image, edit the `SANDBOX_DOCKERFILE` heredoc in `startup.sh` and
+rebuild:
 
 ```bash
 # Rebuild manually (or reboot the VM to trigger startup.sh)
@@ -252,14 +296,32 @@ and bind-mounts them read-only into every sandbox container:
 | `~/.openclaw/sandbox-git/.git-credentials` | `/.git-credentials` | HTTPS token for git |
 | `~/.openclaw/sandbox-git/git-credential-helper.sh` | `/.git-credential-helper.sh` | Lock-free credential helper |
 | `~/.openclaw/sandbox-git/gh/hosts.yml` | `/.config/gh/hosts.yml` | gh CLI auth |
+| `~/.openclaw/sandbox-git/api-keys.env` | `/.api-keys.env` | Provider/tool API keys |
+| `~/.openclaw/sandbox-git/api-keys-profile.sh` | `/etc/profile.d/api-keys.sh` | Auto-sources API keys on shell init |
 
-Env vars `GIT_CONFIG_GLOBAL=/.gitconfig` and `GH_CONFIG_DIR=/.config/gh` are set
-via `agents.defaults.sandbox.docker.env` so tools find the config regardless of
-the container's `HOME` directory.
+Env vars `GIT_CONFIG_GLOBAL=/.gitconfig`, `GH_CONFIG_DIR=/.config/gh`, and
+`BASH_ENV=/etc/profile.d/api-keys.sh` are set via
+`agents.defaults.sandbox.docker.env` so tools find the config regardless of the
+container's `HOME` directory.
+
+### Sandbox API key forwarding
+
+Provider and tool API keys from Secret Manager are automatically forwarded into
+sandbox containers. The startup script reads `/run/openclaw/env` (tmpfs) and
+writes all non-infrastructure secrets to `api-keys.env`, which is bind-mounted
+read-only into every container. A `/etc/profile.d/` script auto-sources it on
+shell init.
+
+**Included:** All secrets except `OPENCLAW_*`, `*_BOT_TOKEN*`, `*_APP_TOKEN*`.
+
+**To add a new API key for agents:** add it to Secret Manager, restart the
+gateway, and reboot the VM (or re-run the startup script). The key will
+automatically appear in all sandbox containers.
 
 **Design constraints:**
-- Tokens never written to persistent disk (tmpfs vanishes on power-off)
-- Tokens never appear in agent/LLM context (no env vars with secret values)
+- Secrets never written to persistent disk (tmpfs vanishes on power-off)
+- Secrets never stored in `openclaw.json` (only file paths are in config)
+- Secrets never appear in agent/LLM context (sourced from file, not inline env)
 - Bind mounts are read-only — agents cannot modify or exfiltrate credentials
 - Credential helper reads from file without lockfiles (works on read-only fs)
 

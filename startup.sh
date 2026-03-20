@@ -425,29 +425,101 @@ GHCFG
   fi
 }
 
-# Bind-mount tmpfs git credentials into sandbox containers
+# Bind-mount tmpfs credentials (git + API keys) into sandbox containers.
+# Builds bind and env lists dynamically based on which files exist.
 configure_sandbox_git_binds() {
   local sandbox_creds="${OPENCLAW_HOME}/.openclaw/sandbox-git"
-  [[ -f "${sandbox_creds}/.git-credentials" ]] || return 0
-
   local config_file="${OPENCLAW_HOME}/.openclaw/openclaw.json"
+  local has_git=false has_api_keys=false
+
+  [[ -f "${sandbox_creds}/.git-credentials" ]] && has_git=true
+  [[ -f "${sandbox_creds}/api-keys.env" ]] && has_api_keys=true
+
+  # Nothing to bind-mount
+  [[ "${has_git}" == "false" && "${has_api_keys}" == "false" ]] && return 0
   [[ -f "${config_file}" ]] || return 0
 
   local tmp="${config_file}.tmp"
-  jq --arg creds "${sandbox_creds}" '
-    .agents.defaults.sandbox.docker.binds = [
-      ($creds + "/.gitconfig:/.gitconfig:ro"),
-      ($creds + "/.git-credentials:/.git-credentials:ro"),
-      ($creds + "/git-credential-helper.sh:/.git-credential-helper.sh:ro"),
-      ($creds + "/gh:/.config/gh:rw")
-    ] |
-    .agents.defaults.sandbox.docker.env = {
-      "GIT_CONFIG_GLOBAL": "/.gitconfig",
-      "GH_CONFIG_DIR": "/.config/gh"
-    }
+  jq --arg creds "${sandbox_creds}" \
+     --argjson has_git "${has_git}" \
+     --argjson has_api_keys "${has_api_keys}" '
+    .agents.defaults.sandbox.docker.binds = (
+      (if $has_git then [
+        ($creds + "/.gitconfig:/.gitconfig:ro"),
+        ($creds + "/.git-credentials:/.git-credentials:ro"),
+        ($creds + "/git-credential-helper.sh:/.git-credential-helper.sh:ro"),
+        ($creds + "/gh:/.config/gh:rw")
+      ] else [] end) +
+      (if $has_api_keys then [
+        ($creds + "/api-keys.env:/.api-keys.env:ro"),
+        ($creds + "/api-keys-profile.sh:/etc/profile.d/api-keys.sh:ro")
+      ] else [] end)
+    ) |
+    .agents.defaults.sandbox.docker.env = (
+      (if $has_git then {
+        "GIT_CONFIG_GLOBAL": "/.gitconfig",
+        "GH_CONFIG_DIR": "/.config/gh"
+      } else {} end) +
+      (if $has_api_keys then {
+        "BASH_ENV": "/etc/profile.d/api-keys.sh"
+      } else {} end)
+    )
   ' "${config_file}" > "${tmp}" && mv "${tmp}" "${config_file}"
   chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${config_file}"
-  log "Configured sandbox git credential bind mounts (tmpfs → container)"
+  log "Configured sandbox bind mounts (git=${has_git}, api-keys=${has_api_keys})"
+}
+
+# Write secrets to tmpfs for sandbox bind-mounting.
+# Reads /run/openclaw/env and forwards all secrets EXCEPT internal/channel ones.
+# The file is written to the same tmpfs mount as git credentials — never on disk.
+# Excluded: OPENCLAW_* (gateway internals), *_BOT_TOKEN* / *_APP_TOKEN* (channel).
+# Everything else is forwarded so new secrets auto-appear in sandbox containers.
+write_sandbox_api_keys() {
+  local env_file="${SECRETS_ENV}"
+  local sandbox_creds_dir="${OPENCLAW_HOME}/.openclaw/sandbox-git"
+
+  [[ -f "${env_file}" ]] || return 0
+
+  # Ensure tmpfs mount exists (may already be created by git credential setup)
+  if [[ ! -d "${sandbox_creds_dir}" ]] || ! mountpoint -q "${sandbox_creds_dir}" 2>/dev/null; then
+    mkdir -p "${sandbox_creds_dir}"
+    mount -t tmpfs -o "size=1m,mode=700,uid=$(id -u "${OPENCLAW_USER}"),gid=$(id -g "${OPENCLAW_USER}")" \
+      tmpfs "${sandbox_creds_dir}" 2>/dev/null || true
+  fi
+
+  local api_keys_file="${sandbox_creds_dir}/api-keys.env"
+  local profile_script="${sandbox_creds_dir}/api-keys-profile.sh"
+  local count=0
+
+  : > "${api_keys_file}"
+  while IFS='=' read -r key value; do
+    [[ -z "${key}" || "${key}" == \#* ]] && continue
+    # Skip internal/channel secrets — agents don't need these
+    [[ "${key}" == OPENCLAW_* ]] && continue
+    [[ "${key}" == *_BOT_TOKEN* ]] && continue
+    [[ "${key}" == *_APP_TOKEN* ]] && continue
+    # Forward everything else
+    printf '%s=%s\n' "${key}" "${value}" >> "${api_keys_file}"
+    count=$((count + 1))
+  done < "${env_file}"
+
+  chmod 600 "${api_keys_file}"
+  chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${api_keys_file}"
+
+  # Profile script — bind-mounted into /etc/profile.d/ so any shell session
+  # in the container automatically exports the API keys.
+  cat > "${profile_script}" <<'PROFILE'
+#!/bin/sh
+if [ -f /.api-keys.env ]; then
+  set -a
+  . /.api-keys.env
+  set +a
+fi
+PROFILE
+  chmod 644 "${profile_script}"
+  chown "${OPENCLAW_USER}:${OPENCLAW_USER}" "${profile_script}"
+
+  log "Wrote ${count} secret(s) to sandbox tmpfs (${api_keys_file})"
 }
 
 # Ensure skills.load.watch is set (additive, safe to re-run)
@@ -551,14 +623,17 @@ if [ -f "${SENTINEL_FILE}" ]; then
 
   # ── Incremental: rebuild sandbox image if missing new tools ─────────────
   if docker image inspect openclaw-sandbox:bookworm-slim &>/dev/null \
-     && ! docker run --rm openclaw-sandbox:bookworm-slim which node &>/dev/null; then
-    log "Rebuilding sandbox image (adding Node.js, skill tools)…"
+     && { ! docker run --rm openclaw-sandbox:bookworm-slim which node &>/dev/null \
+       || ! docker run --rm openclaw-sandbox:bookworm-slim python3 -c 'import reportlab' &>/dev/null; }; then
+    log "Rebuilding sandbox image (adding Node.js, skill tools, PDF libs)…"
     docker build -t openclaw-sandbox:bookworm-slim - <<'SANDBOX_DOCKERFILE'
 FROM debian:bookworm-slim
 RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-      curl wget git jq python3 ca-certificates gnupg \
-      ripgrep tmux ffmpeg && \
+      curl wget git jq python3 python3-pip ca-certificates gnupg \
+      ripgrep tmux ffmpeg \
+      python3-reportlab python3-pypdf2 && \
+    python3 -m pip install --break-system-packages pdfrw && \
     install -m 0755 -d /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /etc/apt/keyrings/gh.gpg && \
@@ -654,6 +729,7 @@ SANDBOX_DOCKERFILE
 
   # ── Re-create tmpfs git credentials and bind mounts (wiped on reboot) ───
   configure_git_credentials
+  write_sandbox_api_keys
   configure_sandbox_git_binds
   ensure_skills_config
 
@@ -775,8 +851,10 @@ if ! docker image inspect openclaw-sandbox:bookworm-slim &>/dev/null \
 FROM debian:bookworm-slim
 RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-      curl wget git jq python3 ca-certificates gnupg \
-      ripgrep tmux ffmpeg && \
+      curl wget git jq python3 python3-pip ca-certificates gnupg \
+      ripgrep tmux ffmpeg \
+      python3-reportlab python3-pypdf2 && \
+    python3 -m pip install --break-system-packages pdfrw && \
     install -m 0755 -d /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /etc/apt/keyrings/gh.gpg && \
@@ -845,6 +923,7 @@ fi
 
 # ─── 2c. Configure git + GitHub credentials from secrets ─────────────────
 configure_git_credentials
+write_sandbox_api_keys
 configure_sandbox_git_binds
 
 # ─── 2d. Seed Claude models in OpenClaw config ───────────────────────────
@@ -866,6 +945,8 @@ seed_claude_models() {
     .agents.defaults.models["anthropic/claude-haiku-4-5-20251001"] = {} |
     .agents.defaults.models["anthropic/claude-sonnet-4-6"] = {} |
     .agents.defaults.models["anthropic/claude-opus-4-6"] = {} |
+    .agents.defaults.heartbeat.every = "30m" |
+    .agents.defaults.heartbeat.target = "discord" |
     .agents.defaults.sandbox.mode = "all" |
     .agents.defaults.sandbox.docker.network = "bridge" |
     .agents.defaults.sandbox.workspaceAccess = "rw" |
