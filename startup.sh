@@ -605,7 +605,7 @@ if [ -f "${SENTINEL_FILE}" ]; then
   fi
 
   # ── Incremental: install missing skill dependency packages ──────────────
-  SKILL_DEPS=(ripgrep tmux ffmpeg)
+  SKILL_DEPS=(ripgrep tmux ffmpeg clamav clamav-freshclam)
   MISSING_DEPS=()
   for pkg in "${SKILL_DEPS[@]}"; do
     dpkg -s "${pkg}" &>/dev/null || MISSING_DEPS+=("${pkg}")
@@ -614,6 +614,90 @@ if [ -f "${SENTINEL_FILE}" ]; then
     log "Installing skill dependencies: ${MISSING_DEPS[*]}"
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${MISSING_DEPS[@]}"
+  fi
+
+  # ── Incremental: ensure ClamAV scan script + timer exist ────────────────
+  if [[ ! -f /usr/local/bin/clamav-scan.sh ]]; then
+    log "Installing ClamAV scan script and timer…"
+
+    # Disable clamd if it got enabled somehow
+    systemctl disable clamav-daemon.service 2>/dev/null || true
+    systemctl mask clamav-daemon.service 2>/dev/null || true
+
+    mkdir -p /var/log/clamav
+    chown clamav:clamav /var/log/clamav 2>/dev/null || true
+
+    cat > /usr/local/bin/clamav-scan.sh <<'SCANSCRIPT'
+#!/bin/bash
+set -euo pipefail
+LOG_TAG="clamav-scan"
+SCAN_LOG="/var/log/clamav/scan.log"
+logger -t "${LOG_TAG}" "Starting daily antivirus scan"
+RESULT=$(clamscan --recursive --infected \
+  --exclude-dir='^/proc' \
+  --exclude-dir='^/sys' \
+  --exclude-dir='^/dev' \
+  --exclude-dir='^/run' \
+  --exclude-dir='^/var/lib/docker' \
+  / 2>&1) || true
+SUMMARY=$(echo "${RESULT}" | tail -5)
+echo "${SUMMARY}" | while IFS= read -r line; do
+  logger -t "${LOG_TAG}" "${line}"
+done
+echo "=== Scan $(date -u '+%Y-%m-%dT%H:%M:%SZ') ===" >> "${SCAN_LOG}"
+echo "${RESULT}" >> "${SCAN_LOG}"
+INFECTED_FILES=$(echo "${RESULT}" | grep "FOUND$" || true)
+if [[ -n "${INFECTED_FILES}" ]]; then
+  echo "${INFECTED_FILES}" | while IFS= read -r line; do
+    logger -t "${LOG_TAG}" -p auth.crit "INFECTED: ${line}"
+  done
+  logger -t "${LOG_TAG}" -p auth.crit "ACTION REQUIRED: Infected files detected — review scan log"
+else
+  logger -t "${LOG_TAG}" "Scan complete — no infections found"
+fi
+SCANSCRIPT
+    chmod 755 /usr/local/bin/clamav-scan.sh
+
+    cat > /etc/systemd/system/clamav-scan.service <<'SCANUNIT'
+[Unit]
+Description=ClamAV daily filesystem scan
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/clamav-scan.sh
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=3600
+SCANUNIT
+
+    cat > /etc/systemd/system/clamav-scan.timer <<'SCANTIMER'
+[Unit]
+Description=Daily ClamAV scan at 03:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=900
+
+[Install]
+WantedBy=timers.target
+SCANTIMER
+
+    systemctl daemon-reload
+    systemctl enable clamav-freshclam.service 2>/dev/null || true
+    systemctl enable --now clamav-scan.timer
+    log "ClamAV scan timer enabled"
+  fi
+
+  # ── Incremental: patch Ops Agent config if clamav receiver missing ─────
+  OPS_CONFIG="/etc/google-cloud-ops-agent/config.yaml"
+  if [[ -f "${OPS_CONFIG}" ]] && ! grep -q 'clamav_scan' "${OPS_CONFIG}"; then
+    log "Patching Ops Agent config with ClamAV log receiver…"
+    sed -i '/    syslog:/i\    clamav_scan:\n      type: files\n      include_paths:\n        - /var/log/clamav/scan.log\n        - /var/log/clamav/freshclam.log' "${OPS_CONFIG}"
+    sed -i 's/receivers: \[openclaw_journal, syslog\]/receivers: [openclaw_journal, syslog, clamav_scan]/' "${OPS_CONFIG}"
+    systemctl restart google-cloud-ops-agent 2>/dev/null || true
+    log "Ops Agent config updated with ClamAV receivers"
   fi
 
   # ── Incremental: install missing npm-based skill CLIs ───────────────────
@@ -797,6 +881,100 @@ AUTOCFG
   log "  Unattended security upgrades configured (auto-reboot at 04:00)"
 fi
 
+# ─── 1e. Install ClamAV antivirus (SOC2 CC6.8, CC7.1) ─────────────────────
+if ! command -v clamscan &>/dev/null; then
+  log "Installing ClamAV…"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clamav clamav-daemon clamav-freshclam
+
+  # Stop clamd — we use clamscan (one-shot) to avoid ~1GB resident RAM usage
+  systemctl stop clamav-daemon.service 2>/dev/null || true
+  systemctl disable clamav-daemon.service 2>/dev/null || true
+  systemctl mask clamav-daemon.service 2>/dev/null || true
+
+  # Bootstrap signature database
+  systemctl stop clamav-freshclam.service 2>/dev/null || true
+  freshclam || log "WARNING: freshclam failed — signatures will update on next timer run"
+  systemctl start clamav-freshclam.service 2>/dev/null || true
+
+  log "ClamAV installed (clamscan mode, clamd disabled)"
+fi
+
+# Write scan script + systemd timer (idempotent)
+mkdir -p /var/log/clamav
+chown clamav:clamav /var/log/clamav
+
+cat > /usr/local/bin/clamav-scan.sh <<'SCANSCRIPT'
+#!/bin/bash
+# Daily ClamAV scan — runs as oneshot via systemd timer
+set -euo pipefail
+LOG_TAG="clamav-scan"
+SCAN_LOG="/var/log/clamav/scan.log"
+
+logger -t "${LOG_TAG}" "Starting daily antivirus scan"
+
+# Run scan with exclusions for virtual/ephemeral filesystems
+RESULT=$(clamscan --recursive --infected \
+  --exclude-dir='^/proc' \
+  --exclude-dir='^/sys' \
+  --exclude-dir='^/dev' \
+  --exclude-dir='^/run' \
+  --exclude-dir='^/var/lib/docker' \
+  / 2>&1) || true
+
+# Log summary to journald (flows to Cloud Logging)
+SUMMARY=$(echo "${RESULT}" | tail -5)
+echo "${SUMMARY}" | while IFS= read -r line; do
+  logger -t "${LOG_TAG}" "${line}"
+done
+
+# Log full results to file (picked up by Ops Agent)
+echo "=== Scan $(date -u '+%Y-%m-%dT%H:%M:%SZ') ===" >> "${SCAN_LOG}"
+echo "${RESULT}" >> "${SCAN_LOG}"
+
+# Log each infected file at auth.crit for easy alerting
+INFECTED_FILES=$(echo "${RESULT}" | grep "FOUND$" || true)
+if [[ -n "${INFECTED_FILES}" ]]; then
+  echo "${INFECTED_FILES}" | while IFS= read -r line; do
+    logger -t "${LOG_TAG}" -p auth.crit "INFECTED: ${line}"
+  done
+  logger -t "${LOG_TAG}" -p auth.crit "ACTION REQUIRED: Infected files detected — review scan log"
+else
+  logger -t "${LOG_TAG}" "Scan complete — no infections found"
+fi
+SCANSCRIPT
+chmod 755 /usr/local/bin/clamav-scan.sh
+
+cat > /etc/systemd/system/clamav-scan.service <<'SCANUNIT'
+[Unit]
+Description=ClamAV daily filesystem scan
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/clamav-scan.sh
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=3600
+SCANUNIT
+
+cat > /etc/systemd/system/clamav-scan.timer <<'SCANTIMER'
+[Unit]
+Description=Daily ClamAV scan at 03:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=900
+
+[Install]
+WantedBy=timers.target
+SCANTIMER
+
+systemctl daemon-reload
+systemctl enable clamav-freshclam.service 2>/dev/null || true
+systemctl enable --now clamav-scan.timer
+log "ClamAV scan timer enabled (daily 03:00 UTC)"
+
 # ─── 1c. Install Google Cloud Ops Agent for centralized logging ──────────────
 if ! systemctl is-active --quiet google-cloud-ops-agent 2>/dev/null; then
   log "Installing Google Cloud Ops Agent…"
@@ -815,10 +993,15 @@ logging:
       include_paths:
         - /var/log/syslog
         - /var/log/auth.log
+    clamav_scan:
+      type: files
+      include_paths:
+        - /var/log/clamav/scan.log
+        - /var/log/clamav/freshclam.log
   service:
     pipelines:
       default_pipeline:
-        receivers: [openclaw_journal, syslog]
+        receivers: [openclaw_journal, syslog, clamav_scan]
 OPSCONFIG
 
   systemctl restart google-cloud-ops-agent \

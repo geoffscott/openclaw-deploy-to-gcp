@@ -343,8 +343,73 @@ automatically appear in all sandbox containers.
 | Systemd sandbox | `ProtectSystem=strict`, `NoNewPrivileges`, `CapabilityBoundingSet=` (empty), syscall filtering |
 | Network | Port 18789 denied at firewall; SSH only via IAP (priority 500) |
 | OS patching | `unattended-upgrades` with automatic reboot at 04:00 |
+| Antivirus | ClamAV daily scan at 03:00 UTC; results forwarded to Cloud Logging |
 | Audit trail | Cloud Ops Agent forwards journal + syslog + auth.log to Cloud Logging |
 | Secret parsing | `jq` for JSON; values sanitized (newlines stripped) to prevent env injection |
+
+### Antivirus (ClamAV)
+
+ClamAV provides malware detection for SOC2 compliance (CC6.8 malware protection,
+CC7.1 threat detection). It runs in one-shot mode (`clamscan`) instead of
+resident daemon (`clamd`) to avoid ~1GB permanent RAM usage on e2-medium.
+
+| Setting | Value |
+|---------|-------|
+| Scanner | `clamscan` (one-shot, ~200MB RAM during scan only) |
+| Schedule | Daily at 03:00 UTC (before 04:00 reboot window) |
+| Signatures | `freshclam` auto-updates via systemd |
+| Priority | `Nice=19`, `IOSchedulingClass=idle` |
+| Results | Cloud Logging (journald) + `/var/log/clamav/scan.log` |
+| SOC2 controls | CC6.8, CC7.1 |
+
+**Scan exclusions:**
+
+| Path | Why excluded |
+|------|-------------|
+| `/var/lib/docker` | Ephemeral container layers, rebuilt on reboot, causes false positives |
+| `/proc`, `/sys`, `/dev` | Virtual filesystems |
+| `/run` | tmpfs (contains secrets — scanning RAM-backed fs is pointless) |
+
+**Verification:**
+
+```bash
+# Check timer is active
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo systemctl status clamav-scan.timer
+
+# Check signature updates
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo systemctl status clamav-freshclam
+
+# View scan results
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo journalctl -t clamav-scan --no-pager
+
+# Run a manual scan
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo clamscan --recursive --infected /home/openclaw
+```
+
+**Alerting on detections (Cloud Monitoring):**
+
+Create a log-based alert policy in the GCP Console or via `gcloud`:
+
+1. Go to **Monitoring → Alerting → Create Policy**
+2. Add condition: **Log match** with filter:
+   ```
+   resource.type="gce_instance"
+   logName="projects/PROJECT_ID/logs/syslog"
+   textPayload=~"clamav-scan.*INFECTED"
+   ```
+3. Set notification channel (email, PagerDuty, Slack, etc.)
+4. Name: "ClamAV — Malware Detected"
+
+This is not automated in `deploy.sh` because notification channels require
+per-org setup (email addresses, PagerDuty keys, etc.).
 
 ## Verifying provisioned resources
 
