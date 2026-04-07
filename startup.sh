@@ -539,6 +539,28 @@ ensure_skills_config() {
   fi
 }
 
+# Install Vanta MDM agent when metadata flag is set (idempotent)
+install_vanta_agent() {
+  local vanta_flag
+  vanta_flag="$(curl -sf -H "${METADATA_HEADER}" \
+    "${METADATA_URL}/instance/attributes/vanta-agent" 2>/dev/null || echo "")"
+  [[ "${vanta_flag}" == "true" ]] || return 0
+  dpkg -s vanta-agent &>/dev/null && { log "Vanta agent already installed"; return 0; }
+
+  local vanta_key=""
+  [[ -f "${SECRETS_ENV}" ]] && vanta_key="$(grep '^VANTA_KEY=' "${SECRETS_ENV}" | cut -d= -f2-)"
+  if [[ -z "${vanta_key}" ]]; then
+    log "WARNING: vanta-agent flag set but VANTA_KEY secret has no value — skipping"
+    return 0
+  fi
+
+  log "Installing Vanta MDM agent…"
+  VANTA_KEY="${vanta_key}" bash -c \
+    "$(curl -L https://raw.githubusercontent.com/VantaInc/vanta-agent-scripts/main/install-linux.sh)" \
+    && log "Vanta agent installed successfully" \
+    || log "WARNING: Vanta agent installation failed"
+}
+
 # ─── Already provisioned? Run incremental upgrades then ensure service runs ───
 if [ -f "${SENTINEL_FILE}" ]; then
   log "Already provisioned. Running incremental upgrades…"
@@ -822,6 +844,9 @@ SANDBOX_DOCKERFILE
     log "Removing stale sandbox containers…"
     docker rm -f $(docker ps -a --filter name=openclaw-sbx -q) 2>/dev/null || true
   fi
+
+  # ── Vanta MDM agent (opt-in via metadata flag) ─────────────────────────
+  install_vanta_agent
 
   # Always restart so ExecStartPre re-fetches secrets with the updated helper
   systemctl restart openclaw-gateway.service 2>/dev/null || true
@@ -1223,7 +1248,10 @@ systemctl daemon-reload
 systemctl enable openclaw-gateway.service
 systemctl start openclaw-gateway.service
 
-# ─── 5. Mark as provisioned ─────────────────────────────────────────────────
+# ─── 5. Optional: Vanta MDM agent ──────────────────────────────────────────
+install_vanta_agent
+
+# ─── 6. Mark as provisioned ─────────────────────────────────────────────────
 mkdir -p /var/lib/openclaw
 touch "${SENTINEL_FILE}"
 
