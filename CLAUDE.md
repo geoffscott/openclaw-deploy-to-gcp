@@ -97,6 +97,7 @@ resources (no version). Add a version to activate an optional secret.
 | `GITHUB_EMAIL` | GitHub | *(no version)* |
 | `OPENCLAW_GATEWAY_TOKEN` | Gateway | Auto-generated (hex) |
 | `OPENCLAW_PRIMARY_MODEL` | Gateway | `claude-haiku-4-5-20251001` |
+| `VANTA_KEY` | MDM | *(no version)* |
 
 Secrets without versions are ignored until the user adds a value with
 `gcloud secrets versions add`.
@@ -345,6 +346,7 @@ automatically appear in all sandbox containers.
 | OS patching | `unattended-upgrades` with automatic reboot at 04:00 |
 | Antivirus | ClamAV daily scan at 03:00 UTC; results forwarded to Cloud Logging |
 | Audit trail | Cloud Ops Agent forwards journal + syslog + auth.log to Cloud Logging |
+| MDM | Vanta agent (opt-in) for endpoint monitoring and SOC2 compliance |
 | Secret parsing | `jq` for JSON; values sanitized (newlines stripped) to prevent env injection |
 
 ### Antivirus (ClamAV)
@@ -410,6 +412,63 @@ Create a log-based alert policy in the GCP Console or via `gcloud`:
 
 This is not automated in `deploy.sh` because notification channels require
 per-org setup (email addresses, PagerDuty keys, etc.).
+
+### Vanta MDM Agent (optional)
+
+Vanta provides endpoint management and compliance monitoring for SOC2 (CC6.1
+asset management, CC7.1 threat detection). Installation is **opt-in** during
+`deploy.sh` — either via the `--vanta-key` flag or an interactive prompt.
+
+**Enabling during deployment:**
+
+```bash
+# Via flag (non-interactive)
+bash deploy.sh --project "${GCP_PROJECT_ID}" --vanta-key "YOUR_VANTA_KEY"
+
+# Or interactively — the script prompts if stdin is a terminal
+bash deploy.sh --project "${GCP_PROJECT_ID}"
+```
+
+**Enabling on an existing deployment:**
+
+```bash
+# 1. Store the key in Secret Manager
+gcloud secrets versions add VANTA_KEY \
+  --project="${GCP_PROJECT_ID}" \
+  --data-file=- <<< 'your-vanta-key'
+
+# 2. Set the metadata flag
+gcloud compute instances add-metadata iap-vps --zone=us-central1-a \
+  --project="${GCP_PROJECT_ID}" --metadata=vanta-agent=true
+
+# 3. Reboot to trigger installation
+gcloud compute instances reset iap-vps --zone=us-central1-a \
+  --project="${GCP_PROJECT_ID}"
+```
+
+**Verification:**
+
+```bash
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo systemctl status vanta-agent
+```
+
+**Disabling:**
+
+```bash
+# Remove the metadata flag (prevents reinstallation)
+gcloud compute instances remove-metadata iap-vps --zone=us-central1-a \
+  --project="${GCP_PROJECT_ID}" --keys=vanta-agent
+
+# Uninstall the agent
+gcloud compute ssh iap-vps --zone=us-central1-a \
+  --tunnel-through-iap --project="${GCP_PROJECT_ID}" \
+  -- sudo apt remove -y vanta-agent
+```
+
+The metadata flag is **persistent** (never auto-cleared), so Vanta reinstalls
+automatically after snapshot restores or re-provisions.
 
 ## Verifying provisioned resources
 

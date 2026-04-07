@@ -1,7 +1,7 @@
 #!/bin/bash
 # deploy.sh — Deploy an IAP-only VPS on Google Cloud with OpenClaw pre-installed
 # Usage: bash deploy.sh [--project PROJECT_ID] [--zone ZONE] [--name INSTANCE_NAME]
-#                       [--machine-type MACHINE_TYPE]
+#                       [--machine-type MACHINE_TYPE] [--vanta-key VANTA_KEY]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,6 +27,7 @@ while [[ $# -gt 0 ]]; do
     --zone)          ZONE="$2";         shift 2 ;;
     --name)          INSTANCE_NAME="$2"; shift 2 ;;
     --machine-type)  MACHINE_TYPE="$2"; shift 2 ;;
+    --vanta-key)     VANTA_KEY="$2";     shift 2 ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
@@ -357,6 +358,9 @@ if [[ "${SM_READY}" == "true" ]]; then
     # ── Gateway / auth ────────────────────────────────────────────────────
     "OPENCLAW_GATEWAY_TOKEN|${GENERATED_GW_TOKEN}|gateway"
     "OPENCLAW_PRIMARY_MODEL|claude-haiku-4-5-20251001|gateway"
+
+    # ── MDM / compliance (empty = no initial version) ──────────────────
+    "VANTA_KEY||mdm"
   )
 
   CREATED_EMPTY=0
@@ -444,6 +448,31 @@ if [[ "${SM_READY}" != "true" ]]; then
   echo "    done"
   echo ""
   echo "  Then re-run this script to attach the service account to the VM."
+fi
+
+# ─── Optional: Vanta MDM agent ──────────────────────────────────────────────
+VANTA_ENABLED=false
+if [[ -n "${VANTA_KEY:-}" ]]; then
+  VANTA_ENABLED=true
+elif [[ -t 0 ]]; then
+  echo ""
+  read -r -p "▶ Install Vanta MDM agent for compliance monitoring? [y/N] " VANTA_ANSWER
+  if [[ "${VANTA_ANSWER}" =~ ^[Yy] ]]; then
+    read -r -p "  Enter your VANTA_KEY (from Vanta dashboard): " VANTA_KEY
+    if [[ -n "${VANTA_KEY}" ]]; then
+      VANTA_ENABLED=true
+    else
+      echo "  No key provided — skipping Vanta."
+    fi
+  fi
+fi
+
+if [[ "${VANTA_ENABLED}" == "true" && "${SM_READY}" == "true" ]]; then
+  printf '%s' "${VANTA_KEY}" \
+    | gcloud secrets versions add VANTA_KEY \
+        --project="${PROJECT_ID}" --data-file=- --quiet 2>/dev/null \
+    && echo "  ✓ VANTA_KEY stored in Secret Manager" \
+    || echo "  ✗ Could not store VANTA_KEY"
 fi
 
 # ─── Firewall: allow SSH only from IAP ───────────────────────────────────────
@@ -587,6 +616,13 @@ if gcloud compute instances describe "${INSTANCE_NAME}" \
     --metadata-from-file="startup-script=${SCRIPT_DIR}/startup.sh" \
     --quiet 2>/dev/null && echo "  ✓ Startup script updated" || true
 
+  if [[ "${VANTA_ENABLED}" == "true" ]]; then
+    gcloud compute instances add-metadata "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --metadata="vanta-agent=true" --quiet 2>/dev/null \
+      && echo "  ✓ Vanta agent flag set" || true
+  fi
+
   # If Secret Manager is now ready but the VM has no service account, attach one.
   # This handles the case where the initial deploy ran before APIs were enabled.
   if [[ "${SM_READY}" == "true" ]]; then
@@ -620,6 +656,9 @@ else
     echo "  No service account (Secret Manager not configured)."
   fi
 
+  VM_METADATA="enable-oslogin=TRUE"
+  [[ "${VANTA_ENABLED}" == "true" ]] && VM_METADATA="${VM_METADATA},vanta-agent=true"
+
   gcloud compute instances create "${INSTANCE_NAME}" \
     --project="${PROJECT_ID}" \
     --zone="${ZONE}" \
@@ -630,7 +669,7 @@ else
     --no-address \
     "${SA_FLAGS[@]}" \
     --tags="iap-ssh" \
-    --metadata="enable-oslogin=TRUE" \
+    --metadata="${VM_METADATA}" \
     --metadata-from-file="startup-script=${SCRIPT_DIR}/startup.sh" \
     --boot-disk-type="${BOOT_DISK_TYPE}" \
     --boot-disk-size="${BOOT_DISK_SIZE}" \
@@ -861,6 +900,17 @@ echo "    GITHUB_TOKEN     — personal access token or fine-grained token"
 echo "    GITHUB_USERNAME  — your GitHub username"
 echo "    GITHUB_EMAIL     — email for git commits"
 echo ""
+if [[ "${VANTA_ENABLED}" == "true" ]]; then
+  echo "  ── Vanta MDM Agent ─────────────────────────────────────"
+  echo ""
+  echo "  Vanta will install on the VM during boot (first boot or"
+  echo "  next reboot). Verify after boot completes:"
+  echo ""
+  echo "    gcloud compute ssh ${INSTANCE_NAME} --tunnel-through-iap \\"
+  echo "      --project=${PROJECT_ID} --zone=${ZONE} \\"
+  echo "      -- sudo systemctl status vanta-agent"
+  echo ""
+fi
 echo "  ⚠  This project should be dedicated to this deployment."
 echo "     All secrets in the project are loaded into OpenClaw."
 echo "     Secrets without versions are ignored until you add a value."
